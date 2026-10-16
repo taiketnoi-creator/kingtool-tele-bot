@@ -56,7 +56,7 @@ TIER_DISCOUNTS: dict[str, int] = {
     "gold": 5,
 }
 
-_TABLE_NAME_RE = re.compile(r"\b(settings|users|product_overrides|deposits|orders)\b")
+_TABLE_NAME_RE = re.compile(r"(?<!\.)\b(settings|users|product_overrides|deposits|orders)\b")
 
 
 def now_str() -> str:
@@ -72,8 +72,8 @@ class _PgSessionWrapper:
 
     @staticmethod
     def _translate_sql(sql: str) -> str:
-        # Đổi tên bảng sang tiền tố telebot_ để tách biệt sạch sẽ trên Supabase
-        translated = _TABLE_NAME_RE.sub(r"telebot_\1", sql)
+        # Đưa toàn bộ bảng vào Schema riêng 'telebot' để tách biệt 100% khỏi Schema 'public'
+        translated = _TABLE_NAME_RE.sub(r"telebot.\1", sql)
         # Đổi placeholder ? sang %s của psycopg2
         translated = translated.replace("?", "%s")
         return translated
@@ -169,6 +169,30 @@ class Database:
             with self._conn() as conn:
                 conn.execute(
                     """
+                    CREATE SCHEMA IF NOT EXISTS telebot;
+
+                    DO $$
+                    DECLARE
+                        t TEXT;
+                    BEGIN
+                        FOREACH t IN ARRAY ARRAY['settings', 'users', 'product_overrides', 'deposits', 'orders'] LOOP
+                            IF EXISTS (
+                                SELECT 1 FROM information_schema.tables
+                                WHERE table_schema = 'public' AND table_name = 'telebot_' || t
+                            ) THEN
+                                IF NOT EXISTS (
+                                    SELECT 1 FROM information_schema.tables
+                                    WHERE table_schema = 'telebot' AND table_name = t
+                                ) THEN
+                                    EXECUTE format('ALTER TABLE public.telebot_%I SET SCHEMA telebot', t);
+                                    EXECUTE format('ALTER TABLE telebot.telebot_%I RENAME TO %I', t, t);
+                                ELSE
+                                    EXECUTE format('DROP TABLE public.telebot_%I CASCADE', t);
+                                END IF;
+                            END IF;
+                        END LOOP;
+                    END $$;
+
                     CREATE TABLE IF NOT EXISTS settings (
                         key TEXT PRIMARY KEY,
                         value TEXT NOT NULL
@@ -230,7 +254,7 @@ class Database:
                         (k, v),
                     )
             self._migrate_sqlite_to_postgres_if_needed()
-            logger.info("☁️ Đã kết nối cơ sở dữ liệu đám mây Supabase PostgreSQL thành công!")
+            logger.info("☁️ Đã kết nối cơ sở dữ liệu đám mây Supabase PostgreSQL (Schema: telebot) thành công!")
         else:
             with self._conn() as conn:
                 conn.executescript(
@@ -382,7 +406,7 @@ class Database:
                         ),
                     )
                 pg.execute(
-                    "SELECT setval(pg_get_serial_sequence('telebot_deposits', 'id'), "
+                    "SELECT setval(pg_get_serial_sequence('telebot.deposits', 'id'), "
                     "COALESCE((SELECT MAX(id) FROM deposits), 1), true)"
                 )
 
@@ -416,7 +440,7 @@ class Database:
                         ),
                     )
                 pg.execute(
-                    "SELECT setval(pg_get_serial_sequence('telebot_orders', 'id'), "
+                    "SELECT setval(pg_get_serial_sequence('telebot.orders', 'id'), "
                     "COALESCE((SELECT MAX(id) FROM orders), 1), true)"
                 )
 
