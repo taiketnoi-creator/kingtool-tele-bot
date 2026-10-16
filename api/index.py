@@ -17,7 +17,7 @@ class handler(BaseHTTPRequestHandler):
         qs = parse_qs(parsed.query)
         action = (qs.get("action", [""])[0] or "").lower()
 
-        render_url = os.getenv("RENDER_BOT_URL", "").strip().rstrip("/")
+        render_url = os.getenv("RENDER_BOT_URL", "https://kingtool-tele-bot.onrender.com").strip().rstrip("/")
         render_status = "Chưa cấu hình RENDER_BOT_URL"
         if render_url:
             try:
