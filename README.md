@@ -6,8 +6,8 @@ Hệ thống Bot Telegram Reseller kết nối trực tiếp với **ProdSeller 
 
 ## 🏗️ Kiến Trúc Cloud Hoàn Chỉnh
 
-1. **GitHub (`taiketnoi-creator/kingtool-tele-bot`)**: Lưu trữ mã nguồn ở chế độ `Private`, tự động đồng bộ CI/CD với Render & Vercel.
-2. **Supabase (PostgreSQL)**: Lưu trữ vĩnh viễn toàn bộ dữ liệu khách hàng (`telebot_users`), đơn hàng (`telebot_orders`), lịch sử nạp tiền (`telebot_deposits`), cấu hình giá (`telebot_settings`) và giá tuỳ chỉnh (`telebot_product_overrides`).
+1. **GitHub (`taiketnoi-creator/kingtool-tele-bot`)**: Lưu trữ mã nguồn, tự động đồng bộ CI/CD với Render & Vercel.
+2. **Supabase (PostgreSQL - Schema `telebot`)**: Lưu trữ vĩnh viễn trong thư mục Schema riêng biệt `telebot` (`telebot.users`, `telebot.orders`, `telebot.deposits`, `telebot.settings`, `telebot.product_overrides`), tách biệt 100% với Schema `public`.
 3. **Render (Web Service - Singapore)**: Chạy tiến trình [bot.py](file:///d:/Phi%C3%AAn%20b%E1%BA%A3n%20Ai%20agent/Bot%20Tele/bot.py) 24/7 kèm cổng HTTP Health-check (`/health`).
 4. **Vercel (`api/index.py`)**: Cung cấp trang Web theo dõi trạng thái trực tuyến và tự động ping giữ thức Render.
 
