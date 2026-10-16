@@ -1,0 +1,24 @@
+services:
+  - type: web
+    name: kingtool-tele-bot
+    runtime: python
+    region: singapore
+    plan: free
+    buildCommand: pip install -r requirements.txt
+    startCommand: python bot.py
+    healthCheckPath: /health
+    envVars:
+      - key: PYTHON_VERSION
+        value: 3.11.9
+      - key: TELEGRAM_API_ID
+        sync: false
+      - key: TELEGRAM_API_HASH
+        sync: false
+      - key: RESELLER_BOT_TOKEN
+        sync: false
+      - key: PRODSELLER_API_KEY
+        sync: false
+      - key: ADMIN_TELEGRAM_IDS
+        value: "8110826820"
+      - key: DATABASE_URL
+        sync: false

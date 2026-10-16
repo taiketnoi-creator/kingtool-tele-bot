@@ -1,0 +1,12 @@
+.venv/
+.env
+*.session
+*.session-journal
+__pycache__/
+*.py[cod]
+output/*.json
+shop.db
+*.db-journal
+*.db-wal
+*.db-shm
+*.log

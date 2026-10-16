@@ -1,0 +1,866 @@
+"""Quản lý cơ sở dữ liệu (Hỗ trợ song song Supabase PostgreSQL & SQLite Local) cho Bot Reseller."""
+
+from __future__ import annotations
+
+import json
+import logging
+import os
+import re
+import sqlite3
+from contextlib import contextmanager
+from datetime import datetime, timedelta, timezone
+from pathlib import Path
+from typing import Any, Iterator
+
+from dotenv import load_dotenv
+
+try:
+    import psycopg2
+    import psycopg2.extras
+    import psycopg2.pool
+except ImportError:
+    psycopg2 = None  # type: ignore[assignment]
+
+ROOT = Path(__file__).resolve().parent
+load_dotenv(ROOT / ".env")
+
+DB_PATH = ROOT / "shop.db"
+VN_TZ = timezone(timedelta(hours=7))
+logger = logging.getLogger("reseller_bot.db")
+
+DEFAULT_SETTINGS: dict[str, str] = {
+    "markup_percent": "25.0",            # Mặc định tăng +25% so với giá vốn ProdSeller
+    "markup_fixed": "0",                 # Cộng thêm VNĐ cố định
+    "vnd_rate": "25500",                 # Tỷ giá 1 USD = 25,500 VNĐ
+    "bank_id": "MB",                     # Mã ngân hàng VietQR (MB, VCB, TCB, ACB, BIDV, ICB...)
+    "bank_account_no": "0123456789",     # Số tài khoản nhận tiền
+    "bank_account_name": "NGUYEN VAN A",
+    "usdt_bep20_address": "",
+    "binance_pay_id": "",
+    "support_admin": "KingToolShopSupport",  # Kênh/Nhóm CSKH riêng (ẩn danh tài khoản cá nhân)
+    "support_channel": "KingToolShopOfficial",
+    "methods_text": "📭 Hiện chưa có tài liệu hướng dẫn (Methods) nào.",
+    "sepay_api_token": "",               # API Token lấy từ my.sepay.vn (nếu dùng duyệt tự động ban đêm)
+    "sepay_night_start": "23",           # Giờ bắt đầu tự động duyệt (23h00)
+    "sepay_night_end": "6",              # Giờ kết thúc tự động duyệt (06h00 sáng)
+    "sepay_monthly_limit": "50",         # Giới hạn gói Free SePay (50 giao dịch/tháng)
+    "sepay_used_month": "",              # Tháng hiện tại (YYYY-MM)
+    "sepay_used_count": "0",             # Số giao dịch đã tự động duyệt qua SePay trong tháng
+    "referral_commission_pct": "5.0",    # % Hoa hồng giới thiệu khi bạn bè nạp tiền thành công
+    "point_value_vnd": "100",            # Giá trị quy đổi 1 Điểm thưởng = 100 VNĐ
+}
+
+TIER_DISCOUNTS: dict[str, int] = {
+    "bronze": 0,
+    "silver": 3,
+    "gold": 5,
+}
+
+_TABLE_NAME_RE = re.compile(r"\b(settings|users|product_overrides|deposits|orders)\b")
+
+
+def now_str() -> str:
+    return datetime.now(VN_TZ).strftime("%Y-%m-%d %H:%M:%S")
+
+
+class _PgSessionWrapper:
+    """Wrapper giúp cú pháp truy vấn trên psycopg2 tương thích 100% với sqlite3."""
+
+    def __init__(self, pg_conn: Any) -> None:
+        self._conn = pg_conn
+        self._cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+
+    @staticmethod
+    def _translate_sql(sql: str) -> str:
+        # Đổi tên bảng sang tiền tố telebot_ để tách biệt sạch sẽ trên Supabase
+        translated = _TABLE_NAME_RE.sub(r"telebot_\1", sql)
+        # Đổi placeholder ? sang %s của psycopg2
+        translated = translated.replace("?", "%s")
+        return translated
+
+    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any:
+        q = self._translate_sql(sql)
+        self._cur.execute(q, params)
+        return self._cur
+
+    def close(self) -> None:
+        try:
+            self._cur.close()
+        except Exception:
+            pass
+
+
+class Database:
+    def __init__(self, db_path: Path = DB_PATH, database_url: str | None = None) -> None:
+        self.db_path = db_path
+        raw_url = (database_url if database_url is not None else os.getenv("DATABASE_URL", "")).strip()
+        self.database_url = self._normalize_pg_url(raw_url)
+        self.use_postgres = bool(self.database_url and psycopg2 is not None)
+        self._pg_pool: Any = None
+        self._init_db()
+
+    @staticmethod
+    def _normalize_pg_url(url: str) -> str:
+        if not url:
+            return ""
+        if url.startswith("postgres://"):
+            url = "postgresql://" + url[len("postgres://") :]
+        return url
+
+    def _get_pg_conn(self) -> Any:
+        if self._pg_pool is None:
+            self._pg_pool = psycopg2.pool.ThreadedConnectionPool(
+                minconn=1,
+                maxconn=10,
+                dsn=self.database_url,
+                connect_timeout=10,
+                keepalives=1,
+                keepalives_idle=30,
+                keepalives_interval=10,
+                keepalives_count=5,
+            )
+        conn = self._pg_pool.getconn()
+        try:
+            with conn.cursor() as c:
+                c.execute("SELECT 1")
+        except Exception:
+            try:
+                self._pg_pool.putconn(conn, close=True)
+            except Exception:
+                pass
+            conn = psycopg2.connect(self.database_url, connect_timeout=10)
+        return conn
+
+    @contextmanager
+    def _conn(self) -> Iterator[Any]:
+        if self.use_postgres:
+            pg_conn = self._get_pg_conn()
+            wrapper = _PgSessionWrapper(pg_conn)
+            try:
+                yield wrapper
+                pg_conn.commit()
+            except Exception:
+                pg_conn.rollback()
+                raise
+            finally:
+                wrapper.close()
+                if self._pg_pool is not None:
+                    try:
+                        self._pg_pool.putconn(pg_conn)
+                    except Exception:
+                        try:
+                            pg_conn.close()
+                        except Exception:
+                            pass
+        else:
+            conn = sqlite3.connect(self.db_path, timeout=15.0)
+            conn.row_factory = sqlite3.Row
+            try:
+                yield conn
+                conn.commit()
+            except Exception:
+                conn.rollback()
+                raise
+            finally:
+                conn.close()
+
+    def _init_db(self) -> None:
+        if self.use_postgres:
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS users (
+                        telegram_id BIGINT PRIMARY KEY,
+                        username TEXT DEFAULT '',
+                        balance NUMERIC(18, 2) DEFAULT 0.0,
+                        points INTEGER DEFAULT 0,
+                        tier TEXT DEFAULT 'bronze',
+                        orders_count INTEGER DEFAULT 0,
+                        total_spent NUMERIC(18, 2) DEFAULT 0.0,
+                        language TEXT DEFAULT 'vi',
+                        referred_by BIGINT DEFAULT NULL,
+                        joined_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS product_overrides (
+                        product_id TEXT PRIMARY KEY,
+                        custom_price NUMERIC(18, 2) DEFAULT NULL,
+                        hidden INTEGER DEFAULT 0
+                    );
+
+                    CREATE TABLE IF NOT EXISTS deposits (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        username TEXT DEFAULT '',
+                        amount_usd NUMERIC(18, 4) NOT NULL,
+                        amount_vnd BIGINT NOT NULL,
+                        method TEXT NOT NULL,
+                        memo TEXT NOT NULL,
+                        status TEXT DEFAULT 'pending',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT DEFAULT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS orders (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        username TEXT DEFAULT '',
+                        product_id TEXT NOT NULL,
+                        product_name TEXT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        wholesale_cost NUMERIC(18, 4) NOT NULL,
+                        retail_price NUMERIC(18, 2) NOT NULL,
+                        profit NUMERIC(18, 4) NOT NULL,
+                        prodseller_order_id TEXT DEFAULT '',
+                        status TEXT NOT NULL,
+                        delivered_keys TEXT DEFAULT '[]',
+                        activation_email TEXT DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
+                    """
+                )
+                for k, v in DEFAULT_SETTINGS.items():
+                    conn.execute(
+                        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
+                        (k, v),
+                    )
+            self._migrate_sqlite_to_postgres_if_needed()
+            logger.info("☁️ Đã kết nối cơ sở dữ liệu đám mây Supabase PostgreSQL thành công!")
+        else:
+            with self._conn() as conn:
+                conn.executescript(
+                    """
+                    CREATE TABLE IF NOT EXISTS settings (
+                        key TEXT PRIMARY KEY,
+                        value TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS users (
+                        telegram_id INTEGER PRIMARY KEY,
+                        username TEXT DEFAULT '',
+                        balance REAL DEFAULT 0.0,
+                        points INTEGER DEFAULT 0,
+                        tier TEXT DEFAULT 'bronze',
+                        orders_count INTEGER DEFAULT 0,
+                        total_spent REAL DEFAULT 0.0,
+                        language TEXT DEFAULT 'vi',
+                        referred_by INTEGER DEFAULT NULL,
+                        joined_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS product_overrides (
+                        product_id TEXT PRIMARY KEY,
+                        custom_price REAL DEFAULT NULL,
+                        hidden INTEGER DEFAULT 0
+                    );
+
+                    CREATE TABLE IF NOT EXISTS deposits (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        username TEXT DEFAULT '',
+                        amount_usd REAL NOT NULL,
+                        amount_vnd INTEGER NOT NULL,
+                        method TEXT NOT NULL,
+                        memo TEXT NOT NULL,
+                        status TEXT DEFAULT 'pending',
+                        created_at TEXT NOT NULL,
+                        updated_at TEXT DEFAULT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS orders (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        username TEXT DEFAULT '',
+                        product_id TEXT NOT NULL,
+                        product_name TEXT NOT NULL,
+                        quantity INTEGER NOT NULL,
+                        wholesale_cost REAL NOT NULL,
+                        retail_price REAL NOT NULL,
+                        profit REAL NOT NULL,
+                        prodseller_order_id TEXT DEFAULT '',
+                        status TEXT NOT NULL,
+                        delivered_keys TEXT DEFAULT '[]',
+                        activation_email TEXT DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
+                    """
+                )
+                for k, v in DEFAULT_SETTINGS.items():
+                    conn.execute(
+                        "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
+                        (k, v),
+                    )
+
+    def _migrate_sqlite_to_postgres_if_needed(self) -> None:
+        """Đồng bộ dữ liệu sẵn có từ file shop.db ở local lên Supabase trong lần chạy đầu."""
+        if not self.use_postgres or not self.db_path.exists():
+            return
+        try:
+            sq = sqlite3.connect(self.db_path)
+            sq.row_factory = sqlite3.Row
+            with self._conn() as pg:
+                # 1. Settings (chỉ cập nhật các giá trị khác mặc định nếu chưa đồng bộ)
+                already_migrated = pg.execute(
+                    "SELECT value FROM settings WHERE key = ?",
+                    ("_sqlite_migrated",),
+                ).fetchone()
+                if already_migrated:
+                    sq.close()
+                    return
+
+                for r in sq.execute("SELECT key, value FROM settings").fetchall():
+                    pg.execute(
+                        "INSERT INTO settings (key, value) VALUES (?, ?) "
+                        "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                        (r["key"], r["value"]),
+                    )
+
+                # 2. Users
+                for r in sq.execute("SELECT * FROM users").fetchall():
+                    d = dict(r)
+                    pg.execute(
+                        """
+                        INSERT INTO users (
+                            telegram_id, username, balance, points, tier,
+                            orders_count, total_spent, language, referred_by, joined_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (telegram_id) DO NOTHING
+                        """,
+                        (
+                            d["telegram_id"],
+                            d.get("username", ""),
+                            d.get("balance", 0.0),
+                            d.get("points", 0),
+                            d.get("tier", "bronze"),
+                            d.get("orders_count", 0),
+                            d.get("total_spent", 0.0),
+                            d.get("language", "vi"),
+                            d.get("referred_by"),
+                            d.get("joined_at", now_str()),
+                        ),
+                    )
+
+                # 3. Product overrides
+                for r in sq.execute("SELECT * FROM product_overrides").fetchall():
+                    d = dict(r)
+                    pg.execute(
+                        """
+                        INSERT INTO product_overrides (product_id, custom_price, hidden)
+                        VALUES (?, ?, ?)
+                        ON CONFLICT (product_id) DO NOTHING
+                        """,
+                        (d["product_id"], d.get("custom_price"), d.get("hidden", 0)),
+                    )
+
+                # 4. Deposits
+                for r in sq.execute("SELECT * FROM deposits").fetchall():
+                    d = dict(r)
+                    pg.execute(
+                        """
+                        INSERT INTO deposits (
+                            id, user_id, username, amount_usd, amount_vnd,
+                            method, memo, status, created_at, updated_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        (
+                            d["id"],
+                            d["user_id"],
+                            d.get("username", ""),
+                            d["amount_usd"],
+                            d["amount_vnd"],
+                            d["method"],
+                            d["memo"],
+                            d.get("status", "pending"),
+                            d["created_at"],
+                            d.get("updated_at"),
+                        ),
+                    )
+                pg.execute(
+                    "SELECT setval(pg_get_serial_sequence('telebot_deposits', 'id'), "
+                    "COALESCE((SELECT MAX(id) FROM deposits), 1), true)"
+                )
+
+                # 5. Orders
+                for r in sq.execute("SELECT * FROM orders").fetchall():
+                    d = dict(r)
+                    pg.execute(
+                        """
+                        INSERT INTO orders (
+                            id, user_id, username, product_id, product_name, quantity,
+                            wholesale_cost, retail_price, profit, prodseller_order_id,
+                            status, delivered_keys, activation_email, created_at
+                        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        ON CONFLICT (id) DO NOTHING
+                        """,
+                        (
+                            d["id"],
+                            d["user_id"],
+                            d.get("username", ""),
+                            d["product_id"],
+                            d["product_name"],
+                            d["quantity"],
+                            d["wholesale_cost"],
+                            d["retail_price"],
+                            d["profit"],
+                            d.get("prodseller_order_id", ""),
+                            d["status"],
+                            d.get("delivered_keys", "[]"),
+                            d.get("activation_email", ""),
+                            d["created_at"],
+                        ),
+                    )
+                pg.execute(
+                    "SELECT setval(pg_get_serial_sequence('telebot_orders', 'id'), "
+                    "COALESCE((SELECT MAX(id) FROM orders), 1), true)"
+                )
+
+                pg.execute(
+                    "INSERT INTO settings (key, value) VALUES (?, ?) "
+                    "ON CONFLICT (key) DO UPDATE SET value = excluded.value",
+                    ("_sqlite_migrated", now_str()),
+                )
+            sq.close()
+            logger.info("✅ Đã tự động chuyển dữ liệu từ shop.db (Local) lên Supabase!")
+        except Exception as exc:
+            logger.warning("Không thể đồng bộ tự động từ shop.db: %s", exc)
+
+    # --- Settings ---
+    def get_setting(self, key: str, default: str = "") -> str:
+        with self._conn() as conn:
+            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
+            return str(row["value"]) if row else default
+
+    def set_setting(self, key: str, value: str) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "INSERT INTO settings (key, value) VALUES (?, ?) "
+                "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
+                (key, str(value)),
+            )
+
+    def get_all_settings(self) -> dict[str, str]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT key, value FROM settings").fetchall()
+            result = dict(DEFAULT_SETTINGS)
+            for r in rows:
+                result[r["key"]] = r["value"]
+            return result
+
+    # --- Users ---
+    def get_or_create_user(self, telegram_id: int, username: str = "", referred_by: int | None = None) -> dict[str, Any]:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            if not row:
+                conn.execute(
+                    "INSERT INTO users (telegram_id, username, referred_by, joined_at) VALUES (?, ?, ?, ?)",
+                    (telegram_id, username or "", referred_by, now_str()),
+                )
+                row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            elif username and row["username"] != username:
+                conn.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
+                row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            return dict(row)
+
+    def find_user(self, query: str) -> dict[str, Any] | None:
+        q = query.strip().lstrip("@")
+        if not q:
+            return None
+        with self._conn() as conn:
+            if q.isdigit():
+                row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (int(q),)).fetchone()
+                if row:
+                    return dict(row)
+            row = conn.execute(
+                "SELECT * FROM users WHERE LOWER(username) = LOWER(?) ORDER BY total_spent DESC LIMIT 1",
+                (q,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_all_user_ids(self) -> list[int]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT telegram_id FROM users ORDER BY joined_at ASC").fetchall()
+            return [int(r["telegram_id"]) for r in rows]
+
+    def set_user_language(self, telegram_id: int, lang: str) -> None:
+        with self._conn() as conn:
+            conn.execute("UPDATE users SET language = ? WHERE telegram_id = ?", (lang, telegram_id))
+
+    def adjust_balance(self, telegram_id: int, delta_vnd: float) -> int:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET balance = CASE
+                    WHEN balance + ? < 0 THEN 0
+                    ELSE ROUND(balance + ?, 0)
+                END
+                WHERE telegram_id = ?
+                """,
+                (delta_vnd, delta_vnd, telegram_id),
+            )
+            row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            return int(round(float(row["balance"]))) if row else 0
+
+    def deduct_balance_atomic(self, telegram_id: int, amount_vnd: int) -> tuple[bool, int]:
+        """Trừ số dư nguyên tử (Atomic). Trả về (thành_công, số_dư_hiện_tại)."""
+        if amount_vnd <= 0:
+            u = self.get_or_create_user(telegram_id)
+            return True, int(round(float(u["balance"])))
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE users
+                SET balance = ROUND(balance - ?, 0)
+                WHERE telegram_id = ? AND ROUND(balance, 0) >= ?
+                """,
+                (amount_vnd, telegram_id, amount_vnd),
+            )
+            row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            bal = int(round(float(row["balance"]))) if row else 0
+            return cur.rowcount == 1, bal
+
+    def redeem_user_points(self, telegram_id: int, min_points: int = 10) -> tuple[bool, int, int, int]:
+        """Đổi toàn bộ điểm thưởng hiện có sang số dư VNĐ.
+        Trả về (thành_công, số_điểm_đã_đổi, tiền_vnđ_cộng, số_dư_mới).
+        """
+        point_rate = max(1, int(float(self.get_setting("point_value_vnd", "100") or 100)))
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT points, balance FROM users WHERE telegram_id = ?",
+                (telegram_id,),
+            ).fetchone()
+            if not row:
+                return False, 0, 0, 0
+            pts = int(row["points"] or 0)
+            cur_bal = int(round(float(row["balance"] or 0)))
+            if pts < min_points:
+                return False, pts, 0, cur_bal
+            bonus_vnd = pts * point_rate
+            cur = conn.execute(
+                """
+                UPDATE users
+                SET points = 0,
+                    balance = ROUND(balance + ?, 0)
+                WHERE telegram_id = ? AND points = ?
+                """,
+                (bonus_vnd, telegram_id, pts),
+            )
+            if cur.rowcount != 1:
+                return False, 0, 0, cur_bal
+            new_row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            new_bal = int(round(float(new_row["balance"]))) if new_row else cur_bal + bonus_vnd
+            return True, pts, bonus_vnd, new_bal
+
+    def record_purchase_stats(self, telegram_id: int, spent_vnd: int) -> None:
+        points_earned = max(1, int(spent_vnd // 10000))
+        with self._conn() as conn:
+            conn.execute(
+                """
+                UPDATE users
+                SET orders_count = orders_count + 1,
+                    total_spent = ROUND(total_spent + ?, 0),
+                    points = points + ?,
+                    tier = CASE
+                        WHEN total_spent + ? >= 2500000 THEN 'gold'
+                        WHEN total_spent + ? >= 600000 THEN 'silver'
+                        ELSE 'bronze'
+                    END
+                WHERE telegram_id = ?
+                """,
+                (spent_vnd, points_earned, spent_vnd, spent_vnd, telegram_id),
+            )
+
+    def get_referral_stats(self, telegram_id: int) -> int:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT COUNT(*) AS cnt FROM users WHERE referred_by = ?",
+                (telegram_id,),
+            ).fetchone()
+            return int(row["cnt"]) if row else 0
+
+    # --- Product Overrides & Retail Price Calculation (VNĐ) ---
+    def get_product_override(self, product_id: str) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM product_overrides WHERE product_id = ?",
+                (product_id,),
+            ).fetchone()
+            return dict(row) if row else None
+
+    def get_all_overrides(self) -> dict[str, dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM product_overrides").fetchall()
+            return {r["product_id"]: dict(r) for r in rows}
+
+    def set_product_custom_price(self, product_id: str, custom_price: float | None) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO product_overrides (product_id, custom_price, hidden)
+                VALUES (?, ?, 0)
+                ON CONFLICT(product_id) DO UPDATE SET custom_price = excluded.custom_price
+                """,
+                (product_id, custom_price),
+            )
+
+    def toggle_product_hidden(self, product_id: str) -> bool:
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT hidden FROM product_overrides WHERE product_id = ?",
+                (product_id,),
+            ).fetchone()
+            new_val = 0 if (row and row["hidden"]) else 1
+            conn.execute(
+                """
+                INSERT INTO product_overrides (product_id, custom_price, hidden)
+                VALUES (?, NULL, ?)
+                ON CONFLICT(product_id) DO UPDATE SET hidden = excluded.hidden
+                """,
+                (product_id, new_val),
+            )
+            return bool(new_val)
+
+    def compute_wholesale_vnd(self, wholesale_usd: float) -> int:
+        rate = float(self.get_setting("vnd_rate", "25500") or 25500.0)
+        return int(round(wholesale_usd * rate))
+
+    def compute_retail_price(self, product_id: str, wholesale_usd: float, overrides: dict[str, dict[str, Any]] | None = None) -> int:
+        """Tính giá bán lẻ niêm yết bằng VNĐ (đ)."""
+        rate = float(self.get_setting("vnd_rate", "25500") or 25500.0)
+        ov = (overrides or {}).get(product_id) if overrides is not None else self.get_product_override(product_id)
+        if ov and ov.get("custom_price") is not None:
+            cp = float(ov["custom_price"])
+            return int(round(cp * rate)) if cp < 500 else int(round(cp))
+
+        pct = float(self.get_setting("markup_percent", "25.0") or 0.0)
+        fixed_vnd = float(self.get_setting("markup_fixed", "0") or 0.0)
+
+        cost_vnd = wholesale_usd * rate
+        raw_retail = cost_vnd * (1.0 + pct / 100.0) + fixed_vnd
+        raw_retail = max(cost_vnd, raw_retail)
+        if raw_retail < 5000:
+            return max(500, int(round(raw_retail / 500.0) * 500))
+        return int(round(raw_retail / 1000.0) * 1000)
+
+    def compute_tier_unit_price(
+        self,
+        product_id: str,
+        wholesale_usd: float,
+        tier: str = "bronze",
+        overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> tuple[int, int, int]:
+        """Trả về (giá_niêm_yết_vnđ, giá_sau_ưu_đãi_hạng_vnđ, phần_trăm_giảm).
+        Luôn đảm bảo giá sau giảm không bao giờ thấp hơn giá vốn đại lý.
+        """
+        base_vnd = self.compute_retail_price(product_id, wholesale_usd, overrides)
+        disc_pct = TIER_DISCOUNTS.get((tier or "bronze").lower(), 0)
+        if disc_pct <= 0:
+            return base_vnd, base_vnd, 0
+        cost_vnd = self.compute_wholesale_vnd(wholesale_usd)
+        discounted = int(round(base_vnd * (100 - disc_pct) / 100.0 / 500.0) * 500)
+        final_vnd = max(cost_vnd, discounted)
+        if final_vnd >= base_vnd:
+            return base_vnd, base_vnd, 0
+        return base_vnd, final_vnd, disc_pct
+
+    # --- Deposits & SePay Night-Shift Auto-Approval ---
+    def is_in_night_auto_window(self) -> bool:
+        """Kiểm tra giờ hiện tại (Giờ Việt Nam UTC+7) có nằm trong khung 23h00 -> 06h00 sáng không."""
+        now_vn = datetime.now(VN_TZ)
+        h = now_vn.hour
+        start_h = int(float(self.get_setting("sepay_night_start", "23") or 23))
+        end_h = int(float(self.get_setting("sepay_night_end", "6") or 6))
+        if start_h > end_h:
+            return h >= start_h or h < end_h
+        return start_h <= h < end_h
+
+    def get_sepay_quota_status(self) -> tuple[int, int, bool]:
+        """Trả về (used_count, monthly_limit, can_use_sepay). Tự động reset khi sang tháng mới."""
+        cur_month = datetime.now(VN_TZ).strftime("%Y-%m")
+        saved_month = self.get_setting("sepay_used_month", "")
+        if saved_month != cur_month:
+            self.set_setting("sepay_used_month", cur_month)
+            self.set_setting("sepay_used_count", "0")
+            used = 0
+        else:
+            used = int(float(self.get_setting("sepay_used_count", "0") or 0))
+        limit = int(float(self.get_setting("sepay_monthly_limit", "50") or 50))
+        token = (self.get_setting("sepay_api_token", "") or os.getenv("SEPAY_API_TOKEN", "")).strip()
+        can_use = bool(token) and (used < limit)
+        return used, limit, can_use
+
+    def increment_sepay_used(self) -> int:
+        used, _, _ = self.get_sepay_quota_status()
+        new_used = used + 1
+        self.set_setting("sepay_used_count", str(new_used))
+        return new_used
+
+    def expire_old_pending_deposits(self, hours: int = 24) -> int:
+        """Tự động chuyển các đơn nạp pending quá hạn (mặc định 24 giờ) sang trạng thái expired."""
+        cutoff = (datetime.now(VN_TZ) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE deposits
+                SET status = 'expired', updated_at = ?
+                WHERE status = 'pending' AND created_at < ?
+                """,
+                (now_str(), cutoff),
+            )
+            return cur.rowcount
+
+    def create_deposit(self, user_id: int, username: str, amount_usd: float, amount_vnd: int, method: str, memo: str) -> int:
+        self.expire_old_pending_deposits(hours=24)
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO deposits (user_id, username, amount_usd, amount_vnd, method, memo, status, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, 'pending', ?)
+                RETURNING id
+                """,
+                (user_id, username, amount_usd, amount_vnd, method, memo, now_str()),
+            )
+            row = cur.fetchone()
+            return int(row["id"])
+
+    def get_deposit(self, deposit_id: int) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            row = conn.execute("SELECT * FROM deposits WHERE id = ?", (deposit_id,)).fetchone()
+            return dict(row) if row else None
+
+    def get_pending_deposits(self, limit: int = 20) -> list[dict[str, Any]]:
+        self.expire_old_pending_deposits(hours=24)
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM deposits WHERE status = 'pending' ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def update_deposit_status(self, deposit_id: int, status: str, memo: str | None = None) -> bool:
+        with self._conn() as conn:
+            row = conn.execute("SELECT status FROM deposits WHERE id = ?", (deposit_id,)).fetchone()
+            if not row or row["status"] != "pending":
+                return False
+            if memo:
+                conn.execute(
+                    "UPDATE deposits SET status = ?, memo = ?, updated_at = ? WHERE id = ?",
+                    (status, memo, now_str(), deposit_id),
+                )
+            else:
+                conn.execute(
+                    "UPDATE deposits SET status = ?, updated_at = ? WHERE id = ?",
+                    (status, now_str(), deposit_id),
+                )
+            return True
+
+    # --- Orders ---
+    def create_order_record(
+        self,
+        user_id: int,
+        username: str,
+        product_id: str,
+        product_name: str,
+        quantity: int,
+        wholesale_cost: float,
+        retail_price: float,
+        prodseller_order_id: str,
+        status: str,
+        delivered_keys: list[str],
+        activation_email: str = "",
+    ) -> int:
+        profit = round(retail_price - wholesale_cost, 4)
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO orders (
+                    user_id, username, product_id, product_name, quantity,
+                    wholesale_cost, retail_price, profit, prodseller_order_id,
+                    status, delivered_keys, activation_email, created_at
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                RETURNING id
+                """,
+                (
+                    user_id,
+                    username,
+                    product_id,
+                    product_name,
+                    quantity,
+                    wholesale_cost,
+                    retail_price,
+                    profit,
+                    prodseller_order_id,
+                    status,
+                    json.dumps(delivered_keys, ensure_ascii=False),
+                    activation_email,
+                    now_str(),
+                ),
+            )
+            row = cur.fetchone()
+            return int(row["id"])
+
+    def get_user_orders(self, user_id: int, limit: int = 10) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ?",
+                (user_id, limit),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_recent_orders(self, limit: int = 10) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM orders ORDER BY id DESC LIMIT ?",
+                (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_pending_activation_orders(self) -> list[dict[str, Any]]:
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM orders WHERE status = 'paid' AND prodseller_order_id != ''"
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def mark_order_delivered(self, order_id: int, keys: list[str]) -> None:
+        with self._conn() as conn:
+            conn.execute(
+                "UPDATE orders SET status = 'delivered', delivered_keys = ? WHERE id = ?",
+                (json.dumps(keys, ensure_ascii=False), order_id),
+            )
+
+    def get_summary_stats(self) -> dict[str, Any]:
+        self.expire_old_pending_deposits(hours=24)
+        with self._conn() as conn:
+            u_cnt = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()["c"]
+            o_row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt,
+                       COALESCE(SUM(retail_price), 0) AS rev,
+                       COALESCE(SUM(wholesale_cost), 0) AS cost,
+                       COALESCE(SUM(profit), 0) AS prof
+                FROM orders
+                WHERE status IN ('paid', 'delivered')
+                """
+            ).fetchone()
+            d_row = conn.execute(
+                "SELECT COALESCE(SUM(amount_vnd), 0) AS dep FROM deposits WHERE status = 'approved'"
+            ).fetchone()
+            p_row = conn.execute(
+                "SELECT COUNT(*) AS pcnt FROM deposits WHERE status = 'pending'"
+            ).fetchone()
+            return {
+                "users_count": int(u_cnt),
+                "orders_count": int(o_row["cnt"]),
+                "total_revenue": round(float(o_row["rev"]), 2),
+                "total_cost": round(float(o_row["cost"]), 2),
+                "total_profit": round(float(o_row["prof"]), 2),
+                "total_deposited": round(float(d_row["dep"]), 2),
+                "pending_deposits_count": int(p_row["pcnt"]),
+            }
