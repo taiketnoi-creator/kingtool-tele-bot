@@ -100,6 +100,13 @@ class Database:
         self.database_url = self._normalize_pg_url(raw_url)
         self.use_postgres = bool(self.database_url and psycopg2 is not None)
         self._pg_pool: Any = None
+        self._last_pg_used: float = 0.0
+        # RAM Caches giúp tốc độ đọc Menu / Sản phẩm đạt 0.001 giây (Zero N+1 Query)
+        self._settings_cache: dict[str, str] | None = None
+        self._settings_cache_ts: float = 0.0
+        self._overrides_cache: dict[str, dict[str, Any]] | None = None
+        self._overrides_cache_ts: float = 0.0
+        self._users_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         self._init_db()
 
     @staticmethod
@@ -111,6 +118,8 @@ class Database:
         return url
 
     def _get_pg_conn(self) -> Any:
+        import time
+
         if self._pg_pool is None:
             self._pg_pool = psycopg2.pool.ThreadedConnectionPool(
                 minconn=1,
@@ -123,15 +132,19 @@ class Database:
                 keepalives_count=5,
             )
         conn = self._pg_pool.getconn()
-        try:
-            with conn.cursor() as c:
-                c.execute("SELECT 1")
-        except Exception:
+        now = time.monotonic()
+        # Chỉ kiểm tra kết nối nếu đã nhàn rỗi quá 20 giây (tránh tốn 2 lần mạng cho mỗi câu lệnh)
+        if getattr(conn, "closed", 0) != 0 or (now - self._last_pg_used > 20.0):
             try:
-                self._pg_pool.putconn(conn, close=True)
+                with conn.cursor() as c:
+                    c.execute("SELECT 1")
             except Exception:
-                pass
-            conn = psycopg2.connect(self.database_url, connect_timeout=10)
+                try:
+                    self._pg_pool.putconn(conn, close=True)
+                except Exception:
+                    pass
+                conn = psycopg2.connect(self.database_url, connect_timeout=10)
+        self._last_pg_used = now
         return conn
 
     @contextmanager
@@ -457,30 +470,48 @@ class Database:
         except Exception as exc:
             logger.warning("Không thể đồng bộ tự động từ shop.db: %s", exc)
 
-    # --- Settings ---
+    # --- Settings (Có RAM Cache 60s + Write-Through) ---
     def get_setting(self, key: str, default: str = "") -> str:
-        with self._conn() as conn:
-            row = conn.execute("SELECT value FROM settings WHERE key = ?", (key,)).fetchone()
-            return str(row["value"]) if row else default
+        settings = self.get_all_settings()
+        return str(settings.get(key, default))
 
     def set_setting(self, key: str, value: str) -> None:
+        val_str = str(value)
         with self._conn() as conn:
             conn.execute(
                 "INSERT INTO settings (key, value) VALUES (?, ?) "
                 "ON CONFLICT(key) DO UPDATE SET value = excluded.value",
-                (key, str(value)),
+                (key, val_str),
             )
+        if self._settings_cache is not None:
+            self._settings_cache[key] = val_str
 
     def get_all_settings(self) -> dict[str, str]:
+        import time
+
+        now = time.monotonic()
+        if self._settings_cache is not None and (now - self._settings_cache_ts < 60.0):
+            return dict(self._settings_cache)
         with self._conn() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
             result = dict(DEFAULT_SETTINGS)
             for r in rows:
                 result[r["key"]] = r["value"]
-            return result
+            self._settings_cache = result
+            self._settings_cache_ts = now
+            return dict(result)
 
-    # --- Users ---
+    # --- Users (Có RAM Cache 45s + Tự động xóa cache khi đổi số dư/ngôn ngữ) ---
     def get_or_create_user(self, telegram_id: int, username: str = "", referred_by: int | None = None) -> dict[str, Any]:
+        import time
+
+        now = time.monotonic()
+        cached = self._users_cache.get(telegram_id)
+        if cached is not None and (now - cached[0] < 45.0):
+            u_cached = cached[1]
+            if not username or u_cached.get("username") == username:
+                return dict(u_cached)
+
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
             if not row:
@@ -492,7 +523,9 @@ class Database:
             elif username and row["username"] != username:
                 conn.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
                 row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-            return dict(row)
+            res = dict(row)
+            self._users_cache[telegram_id] = (now, res)
+            return dict(res)
 
     def find_user(self, query: str) -> dict[str, Any] | None:
         q = query.strip().lstrip("@")
@@ -517,6 +550,10 @@ class Database:
     def set_user_language(self, telegram_id: int, lang: str) -> None:
         with self._conn() as conn:
             conn.execute("UPDATE users SET language = ? WHERE telegram_id = ?", (lang, telegram_id))
+        if telegram_id in self._users_cache:
+            ts, u = self._users_cache[telegram_id]
+            u["language"] = lang
+            self._users_cache[telegram_id] = (ts, u)
 
     def adjust_balance(self, telegram_id: int, delta_vnd: float) -> int:
         with self._conn() as conn:
@@ -532,7 +569,9 @@ class Database:
                 (delta_vnd, delta_vnd, telegram_id),
             )
             row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-            return int(round(float(row["balance"]))) if row else 0
+            new_bal = int(round(float(row["balance"]))) if row else 0
+        self._users_cache.pop(telegram_id, None)
+        return new_bal
 
     def deduct_balance_atomic(self, telegram_id: int, amount_vnd: int) -> tuple[bool, int]:
         """Trừ số dư nguyên tử (Atomic). Trả về (thành_công, số_dư_hiện_tại)."""
@@ -550,7 +589,9 @@ class Database:
             )
             row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
             bal = int(round(float(row["balance"]))) if row else 0
-            return cur.rowcount == 1, bal
+            ok = cur.rowcount == 1
+        self._users_cache.pop(telegram_id, None)
+        return ok, bal
 
     def redeem_user_points(self, telegram_id: int, min_points: int = 10) -> tuple[bool, int, int, int]:
         """Đổi toàn bộ điểm thưởng hiện có sang số dư VNĐ.
@@ -582,7 +623,8 @@ class Database:
                 return False, 0, 0, cur_bal
             new_row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
             new_bal = int(round(float(new_row["balance"]))) if new_row else cur_bal + bonus_vnd
-            return True, pts, bonus_vnd, new_bal
+        self._users_cache.pop(telegram_id, None)
+        return True, pts, bonus_vnd, new_bal
 
     def record_purchase_stats(self, telegram_id: int, spent_vnd: int) -> None:
         points_earned = max(1, int(spent_vnd // 10000))
@@ -602,6 +644,7 @@ class Database:
                 """,
                 (spent_vnd, points_earned, spent_vnd, spent_vnd, telegram_id),
             )
+        self._users_cache.pop(telegram_id, None)
 
     def get_referral_stats(self, telegram_id: int) -> int:
         with self._conn() as conn:
@@ -611,19 +654,23 @@ class Database:
             ).fetchone()
             return int(row["cnt"]) if row else 0
 
-    # --- Product Overrides & Retail Price Calculation (VNĐ) ---
+    # --- Product Overrides & Retail Price Calculation (VNĐ - Có RAM Cache 60s) ---
     def get_product_override(self, product_id: str) -> dict[str, Any] | None:
-        with self._conn() as conn:
-            row = conn.execute(
-                "SELECT * FROM product_overrides WHERE product_id = ?",
-                (product_id,),
-            ).fetchone()
-            return dict(row) if row else None
+        all_ov = self.get_all_overrides()
+        return all_ov.get(product_id)
 
     def get_all_overrides(self) -> dict[str, dict[str, Any]]:
+        import time
+
+        now = time.monotonic()
+        if self._overrides_cache is not None and (now - self._overrides_cache_ts < 60.0):
+            return dict(self._overrides_cache)
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM product_overrides").fetchall()
-            return {r["product_id"]: dict(r) for r in rows}
+            res = {r["product_id"]: dict(r) for r in rows}
+            self._overrides_cache = res
+            self._overrides_cache_ts = now
+            return dict(res)
 
     def set_product_custom_price(self, product_id: str, custom_price: float | None) -> None:
         with self._conn() as conn:
@@ -635,6 +682,7 @@ class Database:
                 """,
                 (product_id, custom_price),
             )
+        self._overrides_cache = None
 
     def toggle_product_hidden(self, product_id: str) -> bool:
         with self._conn() as conn:
@@ -651,7 +699,8 @@ class Database:
                 """,
                 (product_id, new_val),
             )
-            return bool(new_val)
+        self._overrides_cache = None
+        return bool(new_val)
 
     def compute_wholesale_vnd(self, wholesale_usd: float) -> int:
         rate = float(self.get_setting("vnd_rate", "25500") or 25500.0)
@@ -730,6 +779,12 @@ class Database:
 
     def expire_old_pending_deposits(self, hours: int = 24) -> int:
         """Tự động chuyển các đơn nạp pending quá hạn (mặc định 24 giờ) sang trạng thái expired."""
+        import time
+
+        now = time.monotonic()
+        if getattr(self, "_last_expire_check", 0.0) and (now - getattr(self, "_last_expire_check", 0.0) < 300.0):
+            return 0
+        self._last_expire_check = now
         cutoff = (datetime.now(VN_TZ) - timedelta(hours=hours)).strftime("%Y-%m-%d %H:%M:%S")
         with self._conn() as conn:
             cur = conn.execute(

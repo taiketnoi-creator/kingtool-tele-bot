@@ -132,26 +132,21 @@ def main_menu_buttons(lang: str, user_id: int) -> list[list[Any]]:
 
 
 async def get_user_info(event: Any) -> tuple[dict[str, Any], str]:
-    sender = await event.get_sender()
     uid = event.sender_id
+    cached = db._users_cache.get(uid)
+    if cached is not None:
+        u_cached = dict(cached[1])
+        return u_cached, u_cached.get("language", "vi")
+    sender = await event.get_sender()
     uname = getattr(sender, "username", None) or getattr(sender, "first_name", None) or ""
     u = db.get_or_create_user(uid, uname)
     return u, u.get("language", "vi")
 
 
 async def send_or_edit(event: Any, text: str, buttons: list[list[Any]] | None = None, force_new: bool = False) -> Any:
-    """Tự động sửa tin nhắn hiện tại, hoặc nếu tin nhắn hiện tại là ảnh (như ảnh QR VietQR)
-    thì xóa ảnh đi và gửi tin nhắn văn bản mới để không bị dính ảnh QR trên các menu sau.
-    """
+    """Sửa tin nhắn hiện tại trực tiếp siêu tốc (không tốn thêm RPC get_message)."""
     if not force_new and hasattr(event, "edit"):
         try:
-            msg = await event.get_message()
-            if msg and getattr(msg, "media", None) is not None:
-                try:
-                    await event.delete()
-                except Exception:
-                    pass
-                return await event.respond(text, buttons=buttons)
             return await event.edit(text, buttons=buttons)
         except Exception:
             pass
@@ -245,11 +240,12 @@ async def render_products_menu(event: Any, group_filter: str | None = None) -> N
 async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> None:
     u, lang = await get_user_info(event)
     tier = u.get("tier", "bronze")
-    p = await ps_client.get_product_by_id(product_id, refresh=True)
+    p = await ps_client.get_product_by_id(product_id, refresh=False)
     if not p:
         if hasattr(event, "answer"):
             await event.answer("❌ Không tìm thấy sản phẩm.", alert=True)
         return
+    asyncio.create_task(ps_client.get_product_by_id(product_id, refresh=True))
 
     base_vnd, unit_retail_vnd, disc_pct = db.compute_tier_unit_price(product_id, float(p["price"]), tier)
     total_retail_vnd = unit_retail_vnd * qty
@@ -690,7 +686,7 @@ async def create_and_show_deposit(
 
     rows = [
         [Button.inline(t(lang, "vietqr_paid_btn"), f"dep:Paid:{dep_id}".encode(), style="success")],
-        [Button.inline(t(lang, "btn_back"), b"menu:deposit")],
+        [Button.inline(t(lang, "btn_back"), b"menu:deposit_qr")],
     ]
 
     bank_id = db.get_setting("bank_id", "MB").strip()
@@ -1338,8 +1334,13 @@ async def run_bot() -> None:
             )
             return
 
-        if data == "menu:deposit":
+        if data in ("menu:deposit", "menu:deposit_qr"):
             await event.answer()
+            if data == "menu:deposit_qr":
+                try:
+                    await event.delete()
+                except Exception:
+                    pass
             await render_deposit_menu(event)
             return
 
@@ -1401,7 +1402,7 @@ async def run_bot() -> None:
             try:
                 wait_rows = [
                     [Button.inline(t(lang, "vietqr_notified_btn"), f"dep:Paid:{dep_id}".encode())],
-                    [Button.inline(t(lang, "btn_back"), b"menu:deposit")],
+                    [Button.inline(t(lang, "btn_back"), b"menu:deposit_qr")],
                 ]
                 await event.edit(buttons=wait_rows)
             except Exception:
