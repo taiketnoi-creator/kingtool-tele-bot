@@ -56,7 +56,7 @@ TIER_DISCOUNTS: dict[str, int] = {
     "gold": 5,
 }
 
-_TABLE_NAME_RE = re.compile(r"(?<!\.)\b(settings|users|product_overrides|deposits|orders)\b")
+_TABLE_NAME_RE = re.compile(r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders)\b(?![.'\"_])")
 
 
 def now_str() -> str:
@@ -78,9 +78,12 @@ class _PgSessionWrapper:
         translated = translated.replace("?", "%s")
         return translated
 
-    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] = ()) -> Any:
+    def execute(self, sql: str, params: tuple[Any, ...] | list[Any] | None = None) -> Any:
         q = self._translate_sql(sql)
-        self._cur.execute(q, params)
+        if params:
+            self._cur.execute(q, params)
+        else:
+            self._cur.execute(q)
         return self._cur
 
     def close(self) -> None:
