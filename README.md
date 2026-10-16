@@ -1,51 +1,42 @@
-# Telethon Safe Menu Analyzer
+# 🤖 KingTool Shop Bot - Hệ Thống Bán Hàng Tự Động (Cloud 24/7)
 
-Công cụ Python để khám phá menu của `@prodsellerbot` bằng **tài khoản Telegram của chính bạn**. Công cụ gửi `/start`, ghi lại tin nhắn/nút inline và chỉ bấm một số mục menu an toàn trong allowlist.
+Hệ thống Bot Telegram Reseller kết nối trực tiếp với **ProdSeller Official API v1**, sử dụng cơ sở dữ liệu đám mây **Supabase (PostgreSQL)**, chạy 24/7 trên **Render** và tích hợp Web Status Dashboard / Keep-Alive trên **Vercel**.
 
-## Giới hạn an toàn
+---
 
-- Không mua hàng, không thanh toán, không nạp/rút tiền.
-- Không bấm các nút có từ khóa nhạy cảm như `buy`, `order`, `payment`, `wallet`, `OTP`, `password`…
-- Không tự nhập số điện thoại, mã OTP, mật khẩu, thông tin thẻ hoặc dữ liệu khách hàng.
-- Chạy tối đa `MAX_DEPTH` tầng menu; mặc định là 2.
-- Kết quả được lưu thành JSON trong thư mục `output`.
+## 🏗️ Kiến Trúc Cloud Hoàn Chỉnh
 
-Đây là công cụ quan sát giao diện/menu, không phải công cụ clone bot, vượt quyền, hay tự động giao dịch.
+1. **GitHub (`taiketnoi-creator/kingtool-tele-bot`)**: Lưu trữ mã nguồn ở chế độ `Private`, tự động đồng bộ CI/CD với Render & Vercel.
+2. **Supabase (PostgreSQL)**: Lưu trữ vĩnh viễn toàn bộ dữ liệu khách hàng (`telebot_users`), đơn hàng (`telebot_orders`), lịch sử nạp tiền (`telebot_deposits`), cấu hình giá (`telebot_settings`) và giá tuỳ chỉnh (`telebot_product_overrides`).
+3. **Render (Web Service - Singapore)**: Chạy tiến trình [bot.py](file:///d:/Phi%C3%AAn%20b%E1%BA%A3n%20Ai%20agent/Bot%20Tele/bot.py) 24/7 kèm cổng HTTP Health-check (`/health`).
+4. **Vercel (`api/index.py`)**: Cung cấp trang Web theo dõi trạng thái trực tuyến và tự động ping giữ thức Render.
 
-## Cài trên Windows
+---
 
-1. Cài Python 3.10 trở lên từ <https://www.python.org/downloads/windows/>. Khi cài, chọn **Add Python to PATH**.
-2. Giải nén ZIP vào thư mục riêng, mở PowerShell tại thư mục đó.
-3. Tạo môi trường ảo và cài thư viện:
+## 🚀 Hướng Dẫn Triển Khai Trên Render (Chạy Bot 24/7)
 
-   ```powershell
-   py -m venv .venv
-   .\.venv\Scripts\Activate.ps1
-   python -m pip install --upgrade pip
-   pip install -r requirements.txt
-   ```
+1. Truy cập [https://dashboard.render.com](https://dashboard.render.com) → Đăng nhập bằng **GitHub**.
+2. Bấm **New +** → chọn **Web Service** → Chọn repository **`kingtool-tele-bot`**.
+3. Cấu hình dịch vụ:
+   - **Region**: `Singapore (Southeast Asia)`
+   - **Build Command**: `pip install -r requirements.txt`
+   - **Start Command**: `python bot.py`
+   - **Instance Type**: `Free`
+4. Trong mục **Environment Variables**, thêm các biến sau:
+   - `TELEGRAM_API_ID`
+   - `TELEGRAM_API_HASH`
+   - `RESELLER_BOT_TOKEN`
+   - `PRODSELLER_API_KEY`
+   - `ADMIN_TELEGRAM_IDS`
+   - `DATABASE_URL` *(Chuỗi kết nối Supabase Session Pooler IPv4 cổng 5432)*
+5. Bấm **Deploy Web Service**.
 
-4. Sao chép `.env.example` thành `.env`, rồi điền `TELEGRAM_API_ID`, `TELEGRAM_API_HASH` và `BOT_USERNAME`.
-5. Chạy:
+---
 
-   ```powershell
-   python analyzer.py
-   ```
+## 🌐 Hướng Dẫn Triển Khai Trên Vercel (Dashboard & Giữ Thức Render)
 
-Lần chạy đầu, Telethon sẽ yêu cầu số điện thoại, mã đăng nhập Telegram và có thể hỏi mật khẩu 2FA trong cửa sổ PowerShell. Không gửi các giá trị này cho ai.
-
-## Kết quả
-
-Sau khi chạy, mở file `output\analysis-YYYYMMDD-HHMMSS.json`. File chứa tin nhắn đã nhận, các nút được phát hiện, nút nào được xem là an toàn và nút nào đã được bấm.
-
-## Bảo mật bắt buộc
-
-- Không chia sẻ `.env`, file `*.session`, mã OTP, mật khẩu 2FA, API hash hoặc JSON có dữ liệu riêng tư.
-- File `*.session` có thể cho phép truy cập tài khoản Telegram; giữ như mật khẩu và xóa khỏi máy dùng chung.
-- Chỉ dùng API ID/API hash của tài khoản bạn sở hữu và chỉ phân tích bot mà bạn được phép kiểm thử.
-- Nếu bot hiển thị yêu cầu thanh toán hoặc thông tin nhạy cảm, dừng chương trình bằng `Ctrl+C`.
-- Sau khi hoàn tất, xóa file session nếu không cần chạy lại: `safe-analyzer.session`.
-
-## Tùy chỉnh thận trọng
-
-`MAX_DEPTH` chỉ nên tăng khi bạn hiểu rõ menu. Allowlist nằm ở đầu `analyzer.py` trong `SAFE_LABELS`; không nên thêm các nhãn liên quan đến giao dịch, tài khoản hoặc dữ liệu cá nhân.
+1. Truy cập [https://vercel.com/new](https://vercel.com/new) → Import repository **`kingtool-tele-bot`**.
+2. Trong mục **Environment Variables**, thêm:
+   - `DATABASE_URL`: Chuỗi kết nối Supabase.
+   - `RENDER_BOT_URL`: Đường link dịch vụ Render vừa tạo (ví dụ: `https://kingtool-tele-bot.onrender.com`).
+3. Bấm **Deploy**.
