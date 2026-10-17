@@ -35,6 +35,7 @@ from prodseller_client import (
     get_product_icon_and_prefix,
     stock_badge,
 )
+from public_api import get_public_base_url, handle_http_request
 
 ROOT = Path(__file__).resolve().parent
 load_dotenv(ROOT / ".env")
@@ -1183,30 +1184,20 @@ async def poll_pending_activations_loop(client: TelegramClient) -> None:
                 logger.debug("Chưa lấy được trạng thái đơn %s: %s", o["prodseller_order_id"], exc)
 
 
-# ==================== CLOUD HEALTH CHECK SERVER (RENDER / VERCEL PING) ====================
+# ==================== CLOUD HTTP SERVER (/health, /api-docs, /v1/* PUBLIC API) ====================
+_BOT_CLIENT_REF: TelegramClient | None = None
+
+
 async def _handle_http_health(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
-    try:
-        await asyncio.wait_for(reader.read(1024), timeout=5.0)
-        db_mode = "supabase_postgres" if getattr(db, "use_postgres", False) else "local_sqlite"
-        body = (
-            f'{{"ok":true,"bot":"@{BOT_USERNAME_CACHE}","database":"{db_mode}","status":"running"}}'
-        ).encode("utf-8")
-        headers = (
-            "HTTP/1.1 200 OK\r\n"
-            "Content-Type: application/json; charset=utf-8\r\n"
-            f"Content-Length: {len(body)}\r\n"
-            "Connection: close\r\n\r\n"
-        ).encode("utf-8")
-        writer.write(headers + body)
-        await writer.drain()
-    except Exception:
-        pass
-    finally:
-        try:
-            writer.close()
-            await writer.wait_closed()
-        except Exception:
-            pass
+    await handle_http_request(
+        reader,
+        writer,
+        db=db,
+        ps_client=ps_client,
+        bot_client=_BOT_CLIENT_REF,
+        bot_username=BOT_USERNAME_CACHE,
+        admin_ids=ADMIN_IDS,
+    )
 
 
 async def start_health_server() -> None:
@@ -1216,7 +1207,7 @@ async def start_health_server() -> None:
     try:
         port = int(port_str)
         server = await asyncio.start_server(_handle_http_health, "0.0.0.0", port)
-        logger.info("🌐 Cổng Health-Check HTTP đã mở tại 0.0.0.0:%s (Sẵn sàng cho Render & Vercel Ping)", port)
+        logger.info("🌐 Cổng HTTP & Public Reseller API (/v1, /api-docs, /health) đã mở tại 0.0.0.0:%s", port)
         asyncio.create_task(server.serve_forever())
     except Exception as exc:
         logger.warning("Không thể mở cổng HTTP %s: %s", port_str, exc)
@@ -1242,7 +1233,7 @@ async def keep_alive_ping_loop() -> None:
 
 # ==================== MAIN RUNNER ====================
 async def run_bot() -> None:
-    global BOT_USERNAME_CACHE
+    global BOT_USERNAME_CACHE, _BOT_CLIENT_REF
     await start_health_server()
     api_id = int(os.getenv("TELEGRAM_API_ID", "0"))
     api_hash = os.getenv("TELEGRAM_API_HASH", "").strip()
@@ -1252,6 +1243,7 @@ async def run_bot() -> None:
 
     client = TelegramClient(str(ROOT / "reseller-bot-session"), api_id, api_hash)
     await client.start(bot_token=bot_token)
+    _BOT_CLIENT_REF = client
     me = await client.get_me()
     BOT_USERNAME_CACHE = me.username or "KingToolShop_bot"
     logger.info("🚀 Bot Reseller @%s (ID: %s) đang hoạt động (Chế độ tiền tệ: VNĐ)!", BOT_USERNAME_CACHE, me.id)
@@ -1664,11 +1656,57 @@ async def run_bot() -> None:
             await send_or_edit(event, txt, buttons=[[Button.inline(t(lang, "btn_back"), b"menu:profile")]])
             return
 
-        if data == "menu:api":
+        if data in ("menu:api", "api:show", "api:hide", "api:regen"):
+            if data == "api:regen":
+                ak_info = db.regenerate_api_key(uid)
+                await event.answer(t(lang, "api_regen_toast"), alert=True)
+                show_full = True
+            else:
+                await event.answer()
+                ak_info = db.get_or_create_api_key(uid)
+                show_full = data == "api:show"
+
+            raw_key = str(ak_info["api_key"])
+            display_key = raw_key if show_full else db.mask_api_key(raw_key)
+            base_url = get_public_base_url()
+            docs_url = f"{base_url}/api-docs"
+            created_date = str(ak_info.get("created_at", ""))[:10]
+            total_reqs = int(ak_info.get("total_requests", 0) or 0)
+
+            txt = t(
+                lang,
+                "api_info",
+                api_key=display_key,
+                base_url=base_url,
+                total_requests=total_reqs,
+                created_at=created_date,
+            )
+            toggle_btn = (
+                Button.inline(t(lang, "api_btn_hide"), b"api:hide")
+                if show_full
+                else Button.inline(t(lang, "api_btn_show"), b"api:show", style="primary")
+            )
+            rows = [
+                [
+                    toggle_btn,
+                    Button.inline(t(lang, "api_btn_regen"), b"api:regen", style="danger"),
+                ],
+                [Button.inline(t(lang, "api_btn_guide"), b"api:guide", style="success")],
+                [Button.url(t(lang, "api_btn_docs"), docs_url)],
+                [Button.inline(t(lang, "btn_back"), b"menu:home")],
+            ]
+            await send_or_edit(event, txt, buttons=rows)
+            return
+
+        if data == "api:guide":
             await event.answer()
-            admin_user = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@")
-            txt = t(lang, "api_info", admin=admin_user)
-            await send_or_edit(event, txt, buttons=[[Button.inline(t(lang, "btn_back"), b"menu:home")]])
+            base_url = get_public_base_url()
+            docs_url = f"{base_url}/api-docs"
+            rows = [
+                [Button.url(t(lang, "api_btn_docs"), docs_url)],
+                [Button.inline(t(lang, "btn_back"), b"menu:api")],
+            ]
+            await send_or_edit(event, t(lang, "api_guide_text"), buttons=rows)
             return
 
         if data == "menu:language":

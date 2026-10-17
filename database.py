@@ -57,7 +57,7 @@ TIER_DISCOUNTS: dict[str, int] = {
 }
 
 _TABLE_NAME_RE = re.compile(
-    r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders|vouchers|voucher_usages)\b(?![.'\"_])"
+    r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders|vouchers|voucher_usages|api_keys)\b(?![.'\"_])"
 )
 
 
@@ -111,6 +111,8 @@ class Database:
         self._vouchers_cache: dict[str, dict[str, Any]] | None = None
         self._vouchers_cache_ts: float = 0.0
         self._users_cache: dict[int, tuple[float, dict[str, Any]]] = {}
+        self._api_keys_by_user: dict[int, tuple[float, dict[str, Any]]] = {}
+        self._api_keys_by_token: dict[str, tuple[float, int]] = {}
         self._init_db()
 
     @staticmethod
@@ -286,6 +288,14 @@ class Database:
                         used_at TEXT NOT NULL,
                         UNIQUE(code, user_id)
                     );
+
+                    CREATE TABLE IF NOT EXISTS api_keys (
+                        user_id BIGINT PRIMARY KEY,
+                        api_key TEXT NOT NULL UNIQUE,
+                        total_requests BIGINT NOT NULL DEFAULT 0,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL
+                    );
                     """
                 )
                 for k, v in DEFAULT_SETTINGS.items():
@@ -371,6 +381,14 @@ class Database:
                         discount_amount INTEGER NOT NULL DEFAULT 0,
                         used_at TEXT NOT NULL,
                         UNIQUE(code, user_id)
+                    );
+
+                    CREATE TABLE IF NOT EXISTS api_keys (
+                        user_id INTEGER PRIMARY KEY,
+                        api_key TEXT NOT NULL UNIQUE,
+                        total_requests INTEGER NOT NULL DEFAULT 0,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL
                     );
                     """
                 )
@@ -1149,6 +1167,162 @@ class Database:
                 (user_id, limit),
             ).fetchall()
             return [dict(r) for r in rows]
+
+    def get_user_orders_paginated(
+        self,
+        user_id: int,
+        page: int = 1,
+        limit: int = 50,
+        status: str | None = None,
+    ) -> tuple[list[dict[str, Any]], int]:
+        page = max(1, int(page))
+        limit = max(1, min(200, int(limit)))
+        offset = (page - 1) * limit
+        with self._conn() as conn:
+            if status and status in ("pending", "paid", "delivered", "failed"):
+                cnt_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM orders WHERE user_id = ? AND status = ?",
+                    (user_id, status),
+                ).fetchone()
+                rows = conn.execute(
+                    "SELECT * FROM orders WHERE user_id = ? AND status = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (user_id, status, limit, offset),
+                ).fetchall()
+            else:
+                cnt_row = conn.execute(
+                    "SELECT COUNT(*) AS c FROM orders WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+                rows = conn.execute(
+                    "SELECT * FROM orders WHERE user_id = ? ORDER BY id DESC LIMIT ? OFFSET ?",
+                    (user_id, limit, offset),
+                ).fetchall()
+            total = int(cnt_row["c"]) if cnt_row else 0
+            return [dict(r) for r in rows], total
+
+    def get_order_by_id(self, order_id: int, user_id: int | None = None) -> dict[str, Any] | None:
+        with self._conn() as conn:
+            if user_id is not None:
+                row = conn.execute(
+                    "SELECT * FROM orders WHERE id = ? AND user_id = ?",
+                    (order_id, user_id),
+                ).fetchone()
+            else:
+                row = conn.execute(
+                    "SELECT * FROM orders WHERE id = ?",
+                    (order_id,),
+                ).fetchone()
+            return dict(row) if row else None
+
+    # --- Reseller Public API Keys (Schema telebot.api_keys + RAM Cache) ---
+    @staticmethod
+    def _generate_new_key_token() -> str:
+        import secrets
+
+        return f"ktk_{secrets.token_hex(24)}"
+
+    @staticmethod
+    def mask_api_key(key_str: str) -> str:
+        k = (key_str or "").strip()
+        if len(k) <= 16:
+            return k
+        return f"{k[:10]}••••••••••••••••••{k[-4:]}"
+
+    def get_or_create_api_key(self, user_id: int) -> dict[str, Any]:
+        import time
+
+        now = time.monotonic()
+        cached = self._api_keys_by_user.get(user_id)
+        if cached is not None and (now - cached[0] < 45.0):
+            return dict(cached[1])
+
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM api_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if not row:
+                new_token = self._generate_new_key_token()
+                created = now_str()
+                conn.execute(
+                    """
+                    INSERT INTO api_keys (user_id, api_key, total_requests, active, created_at)
+                    VALUES (?, ?, 0, 1, ?)
+                    ON CONFLICT(user_id) DO NOTHING
+                    """,
+                    (user_id, new_token, created),
+                )
+                row = conn.execute(
+                    "SELECT * FROM api_keys WHERE user_id = ?",
+                    (user_id,),
+                ).fetchone()
+            res = dict(row)
+            self._api_keys_by_user[user_id] = (now, res)
+            self._api_keys_by_token[str(res["api_key"])] = (now, user_id)
+            return dict(res)
+
+    def regenerate_api_key(self, user_id: int) -> dict[str, Any]:
+        import time
+
+        now = time.monotonic()
+        old_cached = self._api_keys_by_user.pop(user_id, None)
+        if old_cached:
+            self._api_keys_by_token.pop(str(old_cached[1].get("api_key", "")), None)
+
+        new_token = self._generate_new_key_token()
+        created = now_str()
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT api_key FROM api_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            if row:
+                self._api_keys_by_token.pop(str(row["api_key"]), None)
+            conn.execute(
+                """
+                INSERT INTO api_keys (user_id, api_key, total_requests, active, created_at)
+                VALUES (?, ?, 0, 1, ?)
+                ON CONFLICT(user_id) DO UPDATE SET
+                    api_key = excluded.api_key,
+                    active = 1,
+                    created_at = excluded.created_at
+                """,
+                (user_id, new_token, created),
+            )
+            new_row = conn.execute(
+                "SELECT * FROM api_keys WHERE user_id = ?",
+                (user_id,),
+            ).fetchone()
+            res = dict(new_row) if new_row else {
+                "user_id": user_id,
+                "api_key": new_token,
+                "total_requests": 0,
+                "active": 1,
+                "created_at": created,
+            }
+        self._api_keys_by_user[user_id] = (now, res)
+        self._api_keys_by_token[new_token] = (now, user_id)
+        return dict(res)
+
+    def authenticate_api_key(self, api_key: str) -> dict[str, Any] | None:
+        """Xác thực X-API-Key từ HTTP Header, tăng bộ đếm total_requests và trả về thông tin user."""
+        token = (api_key or "").strip()
+        if not token or not token.startswith("ktk_"):
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM api_keys WHERE api_key = ? AND active = 1",
+                (token,),
+            ).fetchone()
+            if not row:
+                return None
+            uid = int(row["user_id"])
+            conn.execute(
+                "UPDATE api_keys SET total_requests = total_requests + 1 WHERE user_id = ?",
+                (uid,),
+            )
+        self._api_keys_by_user.pop(uid, None)
+        return self.get_or_create_user(uid)
 
     def get_recent_orders(self, limit: int = 10) -> list[dict[str, Any]]:
         with self._conn() as conn:

@@ -101,7 +101,36 @@ STRINGS: dict[str, dict[str, str]] = {
             "🎁 **Quyền lợi:** Nhận ngay **+{comm_pct}% hoa hồng** cộng thẳng vào số dư ví mỗi khi bạn bè nạp tiền thành công!\n"
             "👤 Số người đã giới thiệu: **{ref_cnt}**"
         ),
-        "api_info": "🤖 **Kết nối API Đại Lý**\n\nLiên hệ @{admin} để được cấp API kết nối giá sỉ tự động cho shop/website của bạn.",
+        "api_info": (
+            "🤖 **Cổng Kết Nối API Tự Động (API Access)**\n\n"
+            "Sử dụng mã API Key của bạn để đấu nối lấy hàng & mua Key tự động 24/7 trên **Website, Bot Telegram hoặc Tool** riêng của bạn.\n"
+            "*(💡 Nếu bạn chỉ mua lẻ để dùng cá nhân, hãy bấm **🛍️ Sản phẩm** ở Menu chính — không cần dùng mục này)*\n\n"
+            "🔑 **Mã API Key của bạn:**\n"
+            "`{api_key}`\n\n"
+            "🌐 **Base URL:** `{base_url}/v1`\n"
+            "📊 **Tổng lượt gọi API:** `{total_requests:,}`\n"
+            "📅 **Ngày khởi tạo:** `{created_at}`"
+        ),
+        "api_btn_show": "👁 Hiện toàn bộ Key",
+        "api_btn_hide": "🙈 Ẩn bớt Key",
+        "api_btn_regen": "♻️ Tạo lại Key mới",
+        "api_btn_guide": "💡 API này là gì? Hướng dẫn dễ hiểu",
+        "api_btn_docs": "📖 Tài liệu kỹ thuật API (API Docs)",
+        "api_regen_toast": "✅ Đã tạo mã API Key mới thành công! Mã cũ đã bị vô hiệu hóa.",
+        "api_guide_text": (
+            "💡 **GIẢI THÍCH DỄ HIỂU: TÍNH NĂNG API DÙNG ĐỂ LÀM GÌ?**\n\n"
+            "❓ **1. Tôi là khách mua lẻ bình thường thì có cần dùng API không?**\n"
+            "👉 **KHÔNG CẦN.** Nếu bạn chỉ mua tài khoản/phần mềm về sử dụng cá nhân, bạn chỉ cần bấm **💳 Nạp tiền** rồi vào mục **🛍️ Sản phẩm** bấm mua trực tiếp trên Bot như bình thường.\n\n"
+            "🤖 **2. Vậy API Tự Động Mua Hàng dành cho ai?**\n"
+            "Tính năng này dành riêng cho:\n"
+            "• **Chủ Website / Chủ Shop / Đại lý bán lại (Reseller):** Muốn mở Web hoặc Bot Telegram riêng để bán lại toàn bộ kho hàng của Shop mà không cần bỏ vốn ôm hàng trước.\n"
+            "• **Người mua sỉ số lượng lớn bằng Tool (MMO):** Muốn dùng phần mềm tự động gọi lệnh mua hàng loạt mà không cần bấm tay từng đơn.\n\n"
+            "⚙️ **3. Cơ chế vận hành tự động 100% như thế nào?**\n"
+            "• **Bước 1:** Bạn nạp tiền **VNĐ** vào ví trên Bot này (qua chuyển khoản **VietQR**).\n"
+            "• **Bước 2:** Bạn bấm **👁 Hiện toàn bộ Key** để copy mã `ktk_...` và gắn vào Website / Bot riêng của bạn.\n"
+            "• **Bước 3:** Mỗi khi khách hàng của bạn đặt mua trên Web/Bot của bạn -> Hệ thống của bạn tự động gửi lệnh qua API -> Bot tự động trừ tiền VNĐ trong ví của bạn (áp dụng sẵn **Chiết khấu Hạng VIP Silver/Gold**) và **trả Key sản phẩm ngay lập tức trong 1 giây** để bạn giao cho khách và hưởng phần tiền lãi chênh lệch!\n\n"
+            "🔒 **Lưu ý bảo mật:** Mã `API Key` tương đương với quyền sử dụng số dư ví của bạn để mua hàng. Tuyệt đối **không gửi mã API Key cho người lạ**. Nếu nghi ngờ lộ mã, hãy bấm **♻️ Tạo lại Key mới** ngay lập tức."
+        ),
         "methods_default": "📭 Hiện chưa có bài hướng dẫn mới.",
         "lang_prompt": "🌍 Vui lòng chọn ngôn ngữ của bạn:",
         "lang_updated": "✅ Đã chuyển sang Tiếng Việt 🇻🇳",
@@ -224,7 +253,35 @@ STRINGS: dict[str, dict[str, str]] = {
             "🎁 **Reward:** Earn **+{comm_pct}% commission** added directly to your balance whenever your referred friends deposit!\n"
             "👤 Total referred users: **{ref_cnt}**"
         ),
-        "api_info": "🤖 **API Access**\n\nContact @{admin} to get wholesale API access for your shop or website.",
+        "api_info": (
+            "🤖 **API Access**\n\n"
+            "Use your API key to sell products on your own bot, website, or automated tool.\n"
+            "*(💡 If you only buy products for personal use, simply use **🛍️ Products** on the Main Menu)*\n\n"
+            "🔑 **Your API Key:**\n"
+            "`{api_key}`\n\n"
+            "🌐 **Base URL:** `{base_url}/v1`\n"
+            "📊 **Total requests:** `{total_requests:,}`\n"
+            "📅 **Created:** `{created_at}`"
+        ),
+        "api_btn_show": "👁 Show Full Key",
+        "api_btn_hide": "🙈 Hide Key",
+        "api_btn_regen": "♻️ Regenerate",
+        "api_btn_guide": "💡 What is this API? Easy Guide",
+        "api_btn_docs": "📖 API Documentation",
+        "api_regen_toast": "✅ New API Key generated! Previous key has been revoked.",
+        "api_guide_text": (
+            "💡 **WHAT IS THE AUTOMATED RESELLER API?**\n\n"
+            "❓ **1. Do regular customers need this API?**\n"
+            "👉 **NO.** If you are buying accounts/keys for personal use, simply tap **💳 Deposit** and buy directly from **🛍️ Products**.\n\n"
+            "🤖 **2. Who is this API for?**\n"
+            "• **Shop Owners / Resellers:** Connect your own Website or Telegram Bot to resell our entire inventory automatically without pre-purchasing stock.\n"
+            "• **Bulk Buyers / Automation Tools:** Purchase keys programmatically in bulk.\n\n"
+            "⚙️ **3. How does it work?**\n"
+            "• **Step 1:** Top up your **VNĐ** wallet balance on this Bot via **VietQR**.\n"
+            "• **Step 2:** Tap **👁 Show Full Key** to copy your `ktk_...` key and add it to your website/bot.\n"
+            "• **Step 3:** Whenever your customer buys on your website -> Your server calls our API -> Our system deducts the price from your wallet balance (including your **Silver/Gold VIP discount**) and returns the product key instantly!\n\n"
+            "🔒 **Security Warning:** Your API Key can spend your wallet balance. **Never share your API Key with anyone.** If leaked, tap **♻️ Regenerate** immediately."
+        ),
         "methods_default": "📭 No methods available at the moment.",
         "lang_prompt": "🌍 Please choose your language:",
         "lang_updated": "✅ Language set to English 🇬🇧",

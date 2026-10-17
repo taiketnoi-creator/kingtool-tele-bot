@@ -5,6 +5,25 @@
 
 ---
 
+## [v2.4.0] - 2026-10-17: Cổng Public Reseller API v1 (`/v1/*`), Trang Tài Liệu `/api-docs` & Hướng Dẫn Dễ Hiểu Cho Khách Hàng
+
+### 🔌 Tính năng Public Reseller API v1 (Đồng bộ 100% cấu trúc `@ProdSellerBot`)
+- **Cơ sở dữ liệu (`database.py` - Schema `telebot`):**
+  - Bổ sung bảng `telebot.api_keys` (`user_id`, `api_key` dạng `ktk_...`, `total_requests`, `active`, `created_at`) vào `_TABLE_NAME_RE` và `_init_db()` kèm RAM Cache.
+  - Hỗ trợ tạo mã tự động (`get_or_create_api_key`), ẩn/hiện mã (`mask_api_key` dạng `ktk_763b46••••••••••••••••••2030`), cấp lại mã mới (`regenerate_api_key`), và xác thực nhanh (`authenticate_api_key`).
+- **Giao diện nút `API` trên Telegram Bot (`bot.py` & `i18n.py`):**
+  - Hiển thị mã API Key cá nhân của từng khách hàng, Base URL, tổng lượt gọi API (`total_requests`) và ngày tạo.
+  - Trang bị 4 nút chức năng: `👁 Hiện toàn bộ Key` / `🙈 Ẩn bớt Key`, `♻️ Tạo lại Key mới`, **`💡 API này là gì? Hướng dẫn dễ hiểu`** (giải thích rõ cho cả khách mua lẻ lẫn chủ Shop/Web/MMO), và nút mở trang **`📖 Tài liệu kỹ thuật API (API Docs)`**.
+- **Máy chủ HTTP Public API v1 & Tài liệu Dark-Mode (`public_api.py`):**
+  - Tích hợp trực tiếp vào cổng HTTP trên Render (`https://kingtool-tele-bot.onrender.com`) với đầy đủ 6 cổng chuẩn REST:
+    - `GET /v1/balance`: Kiểm tra số dư ví VNĐ và hạng VIP của đại lý.
+    - `GET /v1/products` & `GET /v1/products/:id`: Lấy danh sách sản phẩm, tồn kho và đơn giá VNĐ đã trừ chiết khấu VIP của đại lý (luôn có chốt chặn chống lỗ vốn `>= cost_vnd`).
+    - `POST /v1/orders`: Đặt mua hàng tự động bằng số dư ví VNĐ (hỗ trợ `Idempotency-Key` chống trùng đơn), tự động lấy Key từ kho tổng ProdSeller trả về trong 1 giây và báo đơn về Telegram Admin.
+    - `GET /v1/orders` & `GET /v1/orders/:id`: Tra cứu lịch sử đơn hàng và trạng thái đơn kích hoạt Email.
+  - Xây dựng trang tài liệu Dark-Mode tại `/api-docs` kèm ví dụ mẫu bằng Python và Node.js.
+
+---
+
 ## [v2.3.0] - 2026-10-17: Hệ Thống Mã Giảm Giá (Voucher System) & Chốt Chặn Chống Lỗ Vốn Tuyệt Đối
 
 ### 🎟️ Tính năng Mã Giảm Giá (Voucher System)

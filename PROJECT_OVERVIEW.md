@@ -78,6 +78,8 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
    - `code TEXT PRIMARY KEY`, `discount_type TEXT` (`percent` / `fixed`), `discount_value NUMERIC(18,2)`, `max_uses INTEGER` (`0` = không giới hạn), `used_count INTEGER`, `active INTEGER` (`1` = bật, `0` = tắt), `created_at TEXT`.
 7. **`telebot.voucher_usages`**:
    - `id BIGSERIAL PRIMARY KEY`, `code TEXT`, `user_id BIGINT`, `order_id BIGINT`, `discount_amount BIGINT`, `used_at TEXT`, `UNIQUE(code, user_id)` (mỗi khách chỉ được dùng 1 lần cho mỗi mã).
+8. **`telebot.api_keys`**:
+   - `user_id BIGINT PRIMARY KEY`, `api_key TEXT UNIQUE` (`ktk_...`), `total_requests BIGINT`, `active INTEGER`, `created_at TEXT`.
 
 ---
 
@@ -97,7 +99,7 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
   - Hỗ trợ giảm theo `%` (làm tròn bậc `500đ`) hoặc giảm số tiền VNĐ cố định, kiểm tra số lượt tối đa (`max_uses`) và giới hạn mỗi khách 1 lần/mã (`telebot.voucher_usages`).
   - Admin quản lý trực tiếp trong `/admin` -> `🎟️ Quản lý Voucher` (Tạo mã nhanh 5 giây, Bật/Tắt 1 chạm, Xóa mã).
 - **🛡️ Nguyên tắc bất khả xâm phạm (Chống lỗ vốn):**
-  - Mọi mức giảm giá (VIP + Voucher kết hợp) đều phải qua chốt chặn `total_final_vnd = max(total_cost_vnd, raw_after_voucher)`. Giá thu của khách **không bao giờ thấp hơn giá vốn đại lý**.
+  - Mọi mức giảm giá (VIP + Voucher kết hợp, hoặc gọi qua cổng Public Reseller API `/v1/*`) đều phải qua chốt chặn `total_final_vnd = max(total_cost_vnd, raw_after_voucher)`. Giá thu của khách **không bao giờ thấp hơn giá vốn đại lý**.
 
 ### 5.2. Điểm thưởng (Cashback Points) & Link Giới Thiệu (Referral)
 - **Tích điểm khi mua hàng:** Mỗi `10,000đ` chi tiêu = `+1 điểm` (tối thiểu `1 điểm`/đơn).
@@ -111,8 +113,12 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
   - **Ban ngày (`06:00` – `22:59`):** 100% gửi thông báo kèm 2 nút `✅ Duyệt` / `❌ Từ chối` về Telegram Admin (`8110826820`) để duyệt tay 1 chạm (không tốn lượt SePay).
   - **Ban đêm (`23:00` – `05:59` sáng):** Nếu đã cài `sepay_api_token` và chưa dùng hết 50 lượt/tháng, vòng lặp `poll_night_sepay_deposits_loop` tự động quét API SePay mỗi 30 giây, khớp mã `SPX...` và số tiền để cộng số dư tự động khi Admin đang ngủ.
 
-### 5.4. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
-- Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s), `vouchers` (TTL 60s) và `users` (TTL 45s).
+### 5.4. Cổng Public Reseller API v1 (`public_api.py` - `/v1/*` & `/api-docs`)
+- Cung cấp mã `ktk_...` riêng cho từng khách hàng tại nút `API` trên Bot (hỗ trợ `👁 Hiện toàn bộ Key`, `♻️ Tạo lại Key mới`, `💡 Hướng dẫn dễ hiểu` và trang web `/api-docs`).
+- Hỗ trợ 6 cổng REST API chuẩn (`GET /v1/balance`, `GET /v1/products`, `GET /v1/products/:id`, `POST /v1/orders`, `GET /v1/orders`, `GET /v1/orders/:id`) giúp các chủ Website/Bot đại lý con đấu nối lấy hàng tự động bằng số dư ví VNĐ.
+
+### 5.5. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
+- Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s), `vouchers` (TTL 60s), `api_keys` (TTL 45s) và `users` (TTL 45s).
 - Tuyệt đối **KHÔNG** thực hiện truy vấn SQL lặp trong vòng lặp hiển thị danh sách sản phẩm (tránh lỗi N+1 Query).
 - `prodseller_client.py` sử dụng cơ chế **Stale-While-Revalidate**: trả về danh sách sản phẩm từ RAM ngay lập tức (`force=False`) và đồng bộ ngầm mỗi 45 giây.
 
@@ -120,8 +126,9 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 
 ## 6. Định Hướng Phát Triển Tiếp Theo (Roadmap)
 
-- **Tính năng đã hoàn thành gần nhất (`v2.3.0`):**
+- **Tính năng đã hoàn thành gần nhất (`v2.3.0` & `v2.4.0`):**
   - **Hệ thống Mã Giảm Giá (Voucher System - bảng `telebot.vouchers` & `telebot.voucher_usages`)** kèm chốt chặn bảo vệ giá vốn (`total_final_vnd >= total_cost_vnd`).
+  - **Cổng Public Reseller API v1 (`public_api.py` - bảng `telebot.api_keys`) & Trang tài liệu `/api-docs`** kèm mục giải thích dễ hiểu cho khách hàng trên Bot.
 
 ---
 
