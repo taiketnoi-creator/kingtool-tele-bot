@@ -48,6 +48,10 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "sepay_used_count": "0",             # Số giao dịch đã tự động duyệt qua SePay trong tháng
     "referral_commission_pct": "5.0",    # % Hoa hồng giới thiệu khi bạn bè nạp tiền thành công
     "point_value_vnd": "100",            # Giá trị quy đổi 1 Điểm thưởng = 100 VNĐ
+    "low_balance_threshold_usd": "5.0",  # Ngưỡng cảnh báo số dư vốn ProdSeller sắp hết ($ USD)
+    "restock_notify_enabled": "1",       # Tự động đăng thông báo hàng về (Restock) lên kênh (1=Bật, 0=Tắt)
+    "deposit_bonus_enabled": "1",        # Bật/Tắt khuyến mãi cộng thêm % khi nạp tiền theo mốc (1=Bật, 0=Tắt)
+    "deposit_bonus_tiers": "200000:5,500000:10",  # Mốc nạp VNĐ : % thưởng thêm (VD: 200k +5%, 500k +10%)
 }
 
 TIER_DISCOUNTS: dict[str, int] = {
@@ -1018,7 +1022,45 @@ class Database:
             "floor_capped": floor_capped,
         }
 
-    # --- Deposits & SePay Night-Shift Auto-Approval ---
+    # --- Deposits, Deposit Bonus Tiers & SePay Night-Shift Auto-Approval ---
+    def get_deposit_bonus_tiers(self) -> list[tuple[int, float]]:
+        """Trả về danh sách các mốc khuyến mãi nạp tiền [(min_vnd, bonus_pct), ...] tăng dần theo mốc."""
+        enabled = str(self.get_setting("deposit_bonus_enabled", "1") or "0").strip() == "1"
+        if not enabled:
+            return []
+        raw = str(self.get_setting("deposit_bonus_tiers", "200000:5,500000:10") or "").strip()
+        if not raw:
+            return []
+        tiers: list[tuple[int, float]] = []
+        for item in raw.split(","):
+            item = item.strip()
+            if ":" not in item:
+                continue
+            k_str, v_str = item.split(":", 1)
+            try:
+                min_vnd = int(float(k_str.strip()))
+                pct = float(v_str.strip())
+                if min_vnd > 0 and pct > 0:
+                    tiers.append((min_vnd, pct))
+            except ValueError:
+                continue
+        tiers.sort(key=lambda x: x[0])
+        return tiers
+
+    def compute_deposit_bonus(self, amount_vnd: int) -> tuple[int, float]:
+        """Tính số tiền thưởng nạp thêm: Trả về (bonus_vnd, bonus_pct)."""
+        tiers = self.get_deposit_bonus_tiers()
+        if not tiers or amount_vnd <= 0:
+            return 0, 0.0
+        matched_pct = 0.0
+        for min_vnd, pct in tiers:
+            if amount_vnd >= min_vnd:
+                matched_pct = pct
+        if matched_pct <= 0:
+            return 0, 0.0
+        bonus_vnd = int(round(amount_vnd * matched_pct / 100.0))
+        return bonus_vnd, matched_pct
+
     def is_in_night_auto_window(self) -> bool:
         """Kiểm tra giờ hiện tại (Giờ Việt Nam UTC+7) có nằm trong khung 23h00 -> 06h00 sáng không."""
         now_vn = datetime.now(VN_TZ)
@@ -1087,6 +1129,17 @@ class Database:
     def get_deposit(self, deposit_id: int) -> dict[str, Any] | None:
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM deposits WHERE id = ?", (deposit_id,)).fetchone()
+            return dict(row) if row else None
+
+    def find_deposit_by_code(self, code: str) -> dict[str, Any] | None:
+        c = (code or "").strip().upper()
+        if not c:
+            return None
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT * FROM deposits WHERE UPPER(memo) LIKE ? ORDER BY id DESC LIMIT 1",
+                (f"%{c}%",),
+            ).fetchone()
             return dict(row) if row else None
 
     def get_pending_deposits(self, limit: int = 20) -> list[dict[str, Any]]:
@@ -1213,6 +1266,8 @@ class Database:
                     (order_id,),
                 ).fetchone()
             return dict(row) if row else None
+
+    get_order = get_order_by_id
 
     # --- Reseller Public API Keys (Schema telebot.api_keys + RAM Cache) ---
     @staticmethod

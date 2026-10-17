@@ -600,9 +600,84 @@ async def execute_purchase(
                 total_vnd=total_retail_vnd,
             )
         )
+        asyncio.create_task(check_and_alert_low_prodseller_balance(client))
 
 
-# ==================== TỰ ĐỘNG ĐĂNG KÊNH @KingToolShopOfficial ====================
+# ==================== CẢNH BÁO VỐN & TỰ ĐỘNG ĐĂNG KÊNH @KingToolShopOfficial ====================
+_LAST_LOW_BAL_ALERT_TS: float = 0.0
+_LAST_KNOWN_STOCK: dict[str, int] = {}
+
+
+async def check_and_alert_low_prodseller_balance(client: TelegramClient) -> None:
+    """Kiểm tra số dư vốn trên @ProdSellerBot và cảnh báo Admin nếu tụt dưới ngưỡng cài đặt."""
+    global _LAST_LOW_BAL_ALERT_TS
+    try:
+        threshold = float(db.get_setting("low_balance_threshold_usd", "5.0") or 0.0)
+        if threshold <= 0:
+            return
+        now_ts = time.time()
+        if now_ts - _LAST_LOW_BAL_ALERT_TS < 14400.0:  # Cooldown 4 giờ tránh spam
+            return
+        b_info = await ps_client.get_balance()
+        ps_usd = float(b_info.get("balance", 0.0))
+        if ps_usd <= threshold:
+            _LAST_LOW_BAL_ALERT_TS = now_ts
+            rate = float(db.get_setting("vnd_rate", "25500") or 25500.0)
+            ps_vnd = int(round(ps_usd * rate))
+            for adm_id in ADMIN_IDS:
+                try:
+                    await client.send_message(
+                        adm_id,
+                        (
+                            "🚨 **CẢNH BÁO SỐ DƯ VỐN @ProdSellerBot SẮP HẾT!**\n\n"
+                            f"🏦 Số dư vốn hiện tại: **`${ps_usd:.2f}`** (~**{ps_vnd:,}đ**)\n"
+                            f"⚠️ Ngưỡng cảnh báo: **`${threshold:.2f}`**\n\n"
+                            "👉 Vui lòng nạp thêm USDT vào `@ProdSellerBot` sớm để không bị gián đoạn khi khách mua hàng tự động!"
+                        ),
+                    )
+                except Exception:
+                    pass
+    except Exception as exc:
+        logger.debug("Không thể kiểm tra cảnh báo số dư ProdSeller: %s", exc)
+
+
+async def post_restock_notification(client: TelegramClient, restocked_items: list[dict[str, Any]]) -> None:
+    """Tự động đăng thông báo Hàng Về (Restock) lên kênh @KingToolShopOfficial kèm nút Mua Ngay."""
+    try:
+        if str(db.get_setting("restock_notify_enabled", "1") or "0").strip() != "1":
+            return
+        ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+        if not ch_name or not restocked_items:
+            return
+        overrides = db.get_all_overrides()
+        lines = [
+            "🔥 **THÔNG BÁO HÀNG VỀ (RESTOCK KHO TỰ ĐỘNG)** 🔥",
+            "━━━━━━━━━━━━━━━━━━━━",
+        ]
+        rows: list[list[Any]] = []
+        for p in restocked_items[:8]:
+            pid = p["id"]
+            price_vnd = db.compute_retail_price(pid, float(p["price"]), overrides)
+            st = p.get("stock")
+            st_txt = f"Còn {st} suất" if isinstance(st, int) else "Sẵn hàng"
+            lines.append(
+                f"🟢 **{p['name'].strip()}**\n"
+                f"   💰 Giá: **`{price_vnd:,}đ`** — 📦 Kho: **{st_txt}**"
+            )
+            short_name = p["name"].strip()[:24]
+            rows.append([
+                Button.url(
+                    f"🛒 Mua ngay: {short_name} ({price_vnd:,}đ)",
+                    f"https://t.me/{BOT_USERNAME_CACHE}?start=BUY_{pid}",
+                )
+            ])
+        lines.append("━━━━━━━━━━━━━━━━━━━━")
+        lines.append("⚡ *Giao dịch tự động 100% — Nhận tài khoản/key ngay sau 2 giây!*")
+        await client.send_message(ch_name, "\n".join(lines), buttons=rows)
+    except Exception as exc:
+        logger.debug("Không thể đăng thông báo Restock lên kênh: %s", exc)
+
+
 async def post_order_social_proof(
     client: TelegramClient,
     order_id: int,
@@ -685,7 +760,6 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True) -> i
     return msg.id if msg else None
 
 
-
 # ==================== DEPOSIT & HOA HỒNG GIỚI THIỆU (VIETQR VNĐ) ====================
 async def reward_referrer_on_deposit(client: TelegramClient, dep: dict[str, Any]) -> None:
     """Cộng hoa hồng tự động cho người giới thiệu khi khách nạp tiền thành công."""
@@ -727,17 +801,27 @@ async def render_deposit_menu(event: Any) -> None:
 async def render_deposit_amounts(event: Any) -> None:
     u, lang = await get_user_info(event)
     amounts_vnd = [20000, 50000, 100000, 200000, 500000, 1000000]
+    tiers = db.get_deposit_bonus_tiers()
+    bonus_banner = ""
+    if tiers:
+        if lang == "vi":
+            tiers_str = " | ".join(f"Nạp từ **{m:,}đ** tặng **+{p:g}%**" for m, p in tiers)
+        else:
+            tiers_str = " | ".join(f"From **{m:,}đ** get **+{p:g}%**" for m, p in tiers)
+        bonus_banner = t(lang, "deposit_bonus_banner", tiers_text=tiers_str)
+
     rows: list[list[Any]] = []
     for i in range(0, len(amounts_vnd), 2):
         pair = amounts_vnd[i : i + 2]
         row = []
         for vnd in pair:
-            lbl = f"{vnd:,}đ"
+            _, b_pct = db.compute_deposit_bonus(vnd)
+            lbl = f"🎁 {vnd:,}đ (+{b_pct:g}%)" if b_pct > 0 else f"{vnd:,}đ"
             row.append(Button.inline(lbl, f"dep:create:vietqr:{vnd}".encode(), style="success"))
         rows.append(row)
     rows.append([Button.inline(t(lang, "custom_amount_btn"), b"dep:custom:vietqr", style="primary")])
     rows.append([Button.inline(t(lang, "btn_back"), b"menu:deposit")])
-    await send_or_edit(event, t(lang, "deposit_choose_amount"), buttons=rows)
+    await send_or_edit(event, t(lang, "deposit_choose_amount", bonus_banner=bonus_banner), buttons=rows)
 
 
 async def create_and_show_deposit(
@@ -850,16 +934,28 @@ async def try_night_sepay_auto_approve(client: TelegramClient, dep: dict[str, An
         return True
 
     new_used = db.increment_sepay_used()
-    new_bal = db.adjust_balance(dep["user_id"], amt_vnd)
+    bonus_vnd, bonus_pct = db.compute_deposit_bonus(amt_vnd)
+    total_added = amt_vnd + bonus_vnd
+    new_bal = db.adjust_balance(dep["user_id"], total_added)
     await reward_referrer_on_deposit(client, dep)
 
     target_user = db.get_or_create_user(int(dep["user_id"]))
     u_lang = target_user.get("language", "vi")
     try:
-        await client.send_message(
-            dep["user_id"],
-            t(u_lang, "deposit_approved_msg", dep_id=dep_id, amt_vnd=amt_vnd, new_bal=new_bal),
-        )
+        if bonus_vnd > 0:
+            msg_txt = t(
+                u_lang,
+                "deposit_approved_bonus_msg",
+                dep_id=dep_id,
+                amt_vnd=amt_vnd,
+                bonus_pct=f"{bonus_pct:g}",
+                bonus_vnd=bonus_vnd,
+                total_added=total_added,
+                new_bal=new_bal,
+            )
+        else:
+            msg_txt = t(u_lang, "deposit_approved_msg", dep_id=dep_id, amt_vnd=amt_vnd, new_bal=new_bal)
+        await client.send_message(dep["user_id"], msg_txt)
     except Exception:
         pass
 
@@ -869,6 +965,7 @@ async def try_night_sepay_auto_approve(client: TelegramClient, dep: dict[str, An
         if new_used >= limit
         else ""
     )
+    bonus_adm = f" (+KM `{bonus_vnd:,}đ`)" if bonus_vnd > 0 else ""
     for adm_id in ADMIN_IDS:
         try:
             await client.send_message(
@@ -876,7 +973,7 @@ async def try_night_sepay_auto_approve(client: TelegramClient, dep: dict[str, An
                 (
                     f"🌙 **[SEPAY TỰ ĐỘNG DUYỆT BAN ĐÊM #{dep_id}]**\n\n"
                     f"👤 Khách: `{dep['user_id']}` (@{dep['username']})\n"
-                    f"💵 Đã cộng tự động: **+{amt_vnd:,}đ** (Số dư mới: **{new_bal:,}đ**)\n"
+                    f"💵 Đã cộng tự động: **+{total_added:,}đ**{bonus_adm} (Số dư mới: **{new_bal:,}đ**)\n"
                     f"📊 Lượt SePay Free đã dùng tháng này: **{new_used}/{limit} giao dịch**"
                     f"{quota_warn}"
                 ),
@@ -903,12 +1000,47 @@ async def poll_night_sepay_deposits_loop(client: TelegramClient) -> None:
             logger.debug("Lỗi vòng lặp SePay ban đêm: %s", exc)
 
 
-async def poll_products_sync_loop() -> None:
-    """Đồng bộ danh mục sản phẩm và tồn kho ngầm mỗi 60 giây để khách bấm menu phản hồi tức thì."""
+async def poll_products_sync_loop(client: TelegramClient) -> None:
+    """Đồng bộ danh mục sản phẩm và tồn kho ngầm mỗi 60 giây, phát hiện Restock và kiểm tra vốn."""
+    global _LAST_KNOWN_STOCK
+    try:
+        init_prods = await ps_client.sync_products(force=False)
+        for p in init_prods:
+            pid = str(p.get("id", ""))
+            st = int(p.get("stock", 0) or 0) if p.get("inStock") else 0
+            if pid:
+                _LAST_KNOWN_STOCK[pid] = st
+    except Exception:
+        pass
+
+    loop_cnt = 0
     while True:
         await asyncio.sleep(60)
+        loop_cnt += 1
         try:
-            await ps_client.sync_products(force=True)
+            products = await ps_client.sync_products(force=True)
+            overrides = db.get_all_overrides()
+            restocked: list[dict[str, Any]] = []
+            for p in products:
+                pid = str(p.get("id", ""))
+                if not pid:
+                    continue
+                in_stock = bool(p.get("inStock")) and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
+                cur_stock = int(p.get("stock", 1) or 1) if in_stock else 0
+                prev_stock = _LAST_KNOWN_STOCK.get(pid)
+                _LAST_KNOWN_STOCK[pid] = cur_stock
+
+                ov = overrides.get(pid, {})
+                if ov.get("hidden"):
+                    continue
+                if prev_stock is not None and prev_stock == 0 and cur_stock > 0:
+                    restocked.append(p)
+
+            if restocked:
+                await post_restock_notification(client, restocked)
+
+            if loop_cnt % 15 == 0:
+                await check_and_alert_low_prodseller_balance(client)
         except Exception as exc:
             logger.debug("Lỗi đồng bộ sản phẩm định kỳ: %s", exc)
 
@@ -944,21 +1076,32 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     else:
         sepay_status = f"☀️ Ban ngày: Duyệt Tay (Đêm 23h-06h sẽ Tự Động | Đã dùng {used_sp}/{limit_sp})"
 
+    bonus_on = str(settings.get("deposit_bonus_enabled", "1") or "0").strip() == "1"
+    tiers_raw = settings.get("deposit_bonus_tiers", "200000:5,500000:10")
+    bonus_status = f"🟢 Đang BẬT (`{tiers_raw}`)" if bonus_on else "🔴 Đang TẮT"
+
+    restock_on = str(settings.get("restock_notify_enabled", "1") or "0").strip() == "1"
+    restock_status = "🟢 Đang BẬT" if restock_on else "🔴 Đang TẮT"
+    low_bal_usd = float(settings.get("low_balance_threshold_usd", "5.0") or 0.0)
+
     fixed_val = vnd_int(settings.get("markup_fixed", "0"))
     pending_cnt = stats.get("pending_deposits_count", 0)
     text = (
         "⚙️ **BẢNG ĐIỀU KHIỂN ADMIN (RESELLER PANEL)**\n\n"
         f"🏦 **Vốn bên @ProdSellerBot:** `{ps_bal_str}`\n"
+        f"🔔 Cảnh báo sắp hết vốn: **Khi dưới `${low_bal_usd:.2f}`**\n"
         f"👥 Tổng khách hàng: **{stats['users_count']}** | 📦 Tổng đơn: **{stats['orders_count']}**\n"
         f"⏳ Đơn nạp đang chờ duyệt: **{pending_cnt}**\n"
         f"💰 Tổng doanh thu: **{vnd_int(stats['total_revenue']):,}đ**\n"
         f"📉 Tổng giá vốn: **{vnd_int(stats['total_cost']):,}đ**\n"
         f"💵 **Lợi nhuận ròng: +{vnd_int(stats['total_profit']):,}đ**\n\n"
-        "🔧 **Cấu hình Giá & Ngân hàng hiện tại:**\n"
+        "🔧 **Cấu hình Giá, Khuyến mãi & Tự động hóa:**\n"
         f"• Tăng giá tự động (Markup %): **+{settings['markup_percent']}%**\n"
         f"• Cộng thêm cố định (Markup VNĐ): **+{fixed_val:,}đ**\n"
         f"• Tỷ giá quy đổi vốn: **$1 = {int(rate):,}đ**\n"
         f"• Hoa hồng giới thiệu: **+{settings.get('referral_commission_pct', '5.0')}%**\n"
+        f"• 🎁 Khuyến mãi nạp tiền: **{bonus_status}**\n"
+        f"• 📣 Tự động báo Hàng Về (Restock) lên Kênh: **{restock_status}**\n"
         f"• VietQR: **{settings['bank_id']} - {settings['bank_account_no']} ({settings['bank_account_name']})**\n"
         f"• 🌙 SePay (23h-06h): **{sepay_status}**"
     )
@@ -978,6 +1121,14 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
         [
             Button.inline("🏷️ Chỉnh giá riêng / Ẩn-Hiện từng SP (VNĐ)", b"adm:plist:0", style="primary"),
             Button.inline("🎟️ Quản lý Voucher", b"adm:vouchers", style="primary"),
+        ],
+        [
+            Button.inline(f"🎁 {'Tắt' if bonus_on else 'Bật'} KM Nạp", b"adm:tog_bonus"),
+            Button.inline("⚙️ Chỉnh Mốc KM Nạp", b"adm:set:deposit_bonus_tiers"),
+        ],
+        [
+            Button.inline(f"📣 {'Tắt' if restock_on else 'Bật'} Báo Restock", b"adm:tog_restock"),
+            Button.inline("🔔 Mốc Báo Hết Vốn ($)", b"adm:set:low_balance_threshold_usd"),
         ],
         [
             Button.inline("📈 Chỉnh % Lợi nhuận", b"adm:set:markup_percent"),
@@ -1249,7 +1400,7 @@ async def run_bot() -> None:
     logger.info("🚀 Bot Reseller @%s (ID: %s) đang hoạt động (Chế độ tiền tệ: VNĐ)!", BOT_USERNAME_CACHE, me.id)
 
     asyncio.create_task(ps_client.sync_products(force=True))
-    asyncio.create_task(poll_products_sync_loop())
+    asyncio.create_task(poll_products_sync_loop(client))
     asyncio.create_task(poll_pending_activations_loop(client))
     asyncio.create_task(poll_night_sepay_deposits_loop(client))
     asyncio.create_task(keep_alive_ping_loop())
@@ -1266,6 +1417,7 @@ async def run_bot() -> None:
         USER_AWAITING.pop(uid, None)
         arg = (event.pattern_match.group(1) or "").strip()
         ref_id: int | None = None
+        buy_pid: str | None = None
         if arg.startswith("REF_"):
             try:
                 cand = int(arg.replace("REF_", ""))
@@ -1273,12 +1425,18 @@ async def run_bot() -> None:
                     ref_id = cand
             except ValueError:
                 pass
+        elif arg.startswith("BUY_"):
+            buy_pid = arg[4:].strip()
         sender = await event.get_sender()
         uname = getattr(sender, "username", None) or getattr(sender, "first_name", None) or ""
         u = db.get_or_create_user(uid, uname, referred_by=ref_id)
         lang = u.get("language", "vi")
         admin_user = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@")
         channel_user = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@")
+
+        if buy_pid:
+            await render_product_detail(event, buy_pid, qty=1)
+            return
 
         await event.respond(t(lang, "welcome_banner", admin=admin_user, channel=channel_user))
         await event.respond(
@@ -1547,6 +1705,8 @@ async def run_bot() -> None:
                 pass
 
             amt_vnd = vnd_int(dep["amount_vnd"])
+            bonus_vnd, bonus_pct = db.compute_deposit_bonus(amt_vnd)
+            bonus_line = f" (🎁 KM +{bonus_pct:g}% = `+{bonus_vnd:,}đ`)" if bonus_vnd > 0 else ""
             mode_note = (
                 f"🌙 *Đang trong khung 23h-06h (SePay {used_sp}/{limit_sp}): Bot đang tự động quét ngầm, hoặc bạn có thể bấm nút duyệt tay bên dưới:*"
                 if (in_night and can_sp)
@@ -1556,7 +1716,7 @@ async def run_bot() -> None:
                 try:
                     adm_rows = [
                         [
-                            Button.inline(f"✅ Duyệt +{amt_vnd:,}đ", f"adm:dep_ok:{dep_id}".encode(), style="success"),
+                            Button.inline(f"✅ Duyệt +{amt_vnd + bonus_vnd:,}đ", f"adm:dep_ok:{dep_id}".encode(), style="success"),
                             Button.inline("❌ Từ chối", f"adm:dep_no:{dep_id}".encode(), style="danger"),
                         ]
                     ]
@@ -1567,7 +1727,7 @@ async def run_bot() -> None:
                             f"🔔 **YÊU CẦU DUYỆT NẠP TIỀN #{dep_id}**\n\n"
                             f"👤 Khách: `{dep['user_id']}` (@{dep['username']})\n"
                             f"🏦 Phương thức: **VIETQR**\n"
-                            f"💵 Số tiền nạp: **{amt_vnd:,}đ**\n"
+                            f"💵 Số tiền nạp: **{amt_vnd:,}đ**{bonus_line}\n"
                             f"📝 Nội dung CK: `{memo_display}`\n\n"
                             f"{mode_note}"
                         ),
@@ -1632,19 +1792,50 @@ async def run_bot() -> None:
 
         if data == "prof:orders":
             await event.answer()
+            USER_AWAITING.pop(uid, None)
             orders = db.get_user_orders(uid, limit=8)
+            rows: list[list[Any]] = []
             if not orders:
                 txt = t(lang, "orders_empty")
             else:
                 lines = [t(lang, "orders_history_title")]
+                warr_btns: list[Any] = []
                 for o in orders:
                     clean_keys = format_order_keys_preview(o.get("delivered_keys", ""))
                     lines.append(
                         f"• `#{o['id']}` | **{o['product_name']}** (x{o['quantity']}) — **{vnd_int(o['retail_price']):,}đ** [{o['status']}]\n"
                         f"  🔑 `{clean_keys}`"
                     )
+                    if len(warr_btns) < 6:
+                        warr_btns.append(
+                            Button.inline(
+                                t(lang, "warr_btn", order_id=o["id"]),
+                                f"warr:ask:{o['id']}".encode(),
+                            )
+                        )
+                for i in range(0, len(warr_btns), 2):
+                    rows.append(warr_btns[i : i + 2])
                 txt = "\n".join(lines)
-            await send_or_edit(event, txt, buttons=[[Button.inline(t(lang, "btn_back"), b"menu:profile")]])
+            rows.append([Button.inline(t(lang, "btn_back"), b"menu:profile")])
+            await send_or_edit(event, txt, buttons=rows)
+            return
+
+        if data.startswith("warr:ask:"):
+            await event.answer()
+            oid = int(data.split(":")[2])
+            o = db.get_order_by_id(oid, uid)
+            if not o:
+                return
+            USER_AWAITING[uid] = {
+                "type": "warranty_request",
+                "order_id": oid,
+                "product_name": o["product_name"],
+            }
+            await send_or_edit(
+                event,
+                t(lang, "warr_prompt", order_id=oid, name=o["product_name"]),
+                buttons=[[Button.inline(t(lang, "btn_back"), b"prof:orders")]],
+            )
             return
 
         if data == "prof:ref":
@@ -1751,6 +1942,43 @@ async def run_bot() -> None:
             if data == "adm:home":
                 await event.answer()
                 await render_admin_home(event)
+                return
+
+            if data == "adm:tog_bonus":
+                cur = str(db.get_setting("deposit_bonus_enabled", "1") or "0").strip() == "1"
+                new_val = "0" if cur else "1"
+                db.set_setting("deposit_bonus_enabled", new_val)
+                await event.answer("🟢 Đã BẬT Khuyến mãi nạp tiền!" if new_val == "1" else "🔴 Đã TẮT Khuyến mãi nạp tiền!")
+                await render_admin_home(event)
+                return
+
+            if data == "adm:tog_restock":
+                cur = str(db.get_setting("restock_notify_enabled", "1") or "0").strip() == "1"
+                new_val = "0" if cur else "1"
+                db.set_setting("restock_notify_enabled", new_val)
+                await event.answer("🟢 Đã BẬT tự động báo Restock lên Kênh!" if new_val == "1" else "🔴 Đã TẮT tự động báo Restock!")
+                await render_admin_home(event)
+                return
+
+            if data.startswith("adm:warr_reply:"):
+                await event.answer()
+                _, _, target_uid_s, oid_s = data.split(":")
+                target_uid = int(target_uid_s)
+                oid = int(oid_s)
+                USER_AWAITING[uid] = {
+                    "type": "admin_warr_reply",
+                    "target_uid": target_uid,
+                    "order_id": oid,
+                }
+                await send_or_edit(
+                    event,
+                    (
+                        f"💬 **PHẢN HỒI BẢO HÀNH CHO ĐƠN `#{oid}` (Khách `{target_uid}`)**\n\n"
+                        "Nhập nội dung phản hồi hoặc dán **Tài khoản / Key bảo hành mới** vào đây để Bot gửi trực tiếp tới khách hàng:"
+                    ),
+                    buttons=[[Button.inline("« Hủy", b"adm:home")]],
+                    force_new=True,
+                )
                 return
 
             if data == "adm:vouchers":
@@ -1888,6 +2116,16 @@ async def run_bot() -> None:
                     "markup_fixed": "➕ Nhập **số tiền VNĐ cộng thêm cố định** trên mỗi sản phẩm (ví dụ `5000` hoặc `0`):",
                     "vnd_rate": "💱 Nhập **tỷ giá quy đổi VNĐ cho $1 USD** giá vốn (ví dụ: `25500`):",
                     "methods_text": "📖 Nhập nội dung hiển thị cho mục **Hướng dẫn (Methods)**:",
+                    "low_balance_threshold_usd": (
+                        "🔔 **CÀI ĐẶT NGƯỠNG CẢNH BÁO SẮP HẾT VỐN ($ USD)**\n\n"
+                        "Nhập mức số dư USD trên `@ProdSellerBot` mà bạn muốn Bot báo động (ví dụ: `5.0` hoặc `10.0`, nhập `0` để tắt):"
+                    ),
+                    "deposit_bonus_tiers": (
+                        "🎁 **CÀI ĐẶT MỐC KHUYẾN MÃI NẠP TIỀN TỰ ĐỘNG**\n\n"
+                        "Nhập theo cú pháp `MỐC_VNĐ:%_TẶNG` cách nhau bởi dấu phẩy.\n"
+                        "📌 Ví dụ mặc định (Nạp từ 200k tặng 5%, từ 500k tặng 10%):\n"
+                        "`200000:5,500000:10`"
+                    ),
                     "sepay_api_token": (
                         "🌙 **CÀI ĐẶT TOKEN SEPAY (TỰ ĐỘNG DUYỆT ĐÊM 23:00 - 06:00)**\n\n"
                         "1. Đăng ký tài khoản miễn phí tại `https://my.sepay.vn` và liên kết ngân hàng.\n"
@@ -1943,22 +2181,35 @@ async def run_bot() -> None:
                     return
                 db.update_deposit_status(dep_id, "approved")
                 amt_vnd = vnd_int(dep["amount_vnd"])
-                new_bal = db.adjust_balance(dep["user_id"], amt_vnd)
+                bonus_vnd, bonus_pct = db.compute_deposit_bonus(amt_vnd)
+                total_added = amt_vnd + bonus_vnd
+                new_bal = db.adjust_balance(dep["user_id"], total_added)
                 await reward_referrer_on_deposit(client, dep)
+                bonus_adm = f" (Gồm KM `+{bonus_vnd:,}đ`)" if bonus_vnd > 0 else ""
                 await send_or_edit(
                     event,
                     f"✅ **ĐÃ DUYỆT ĐƠN NẠP #{dep_id}**\n"
                     f"👤 Khách: `{dep['user_id']}` (@{dep['username']})\n"
-                    f"💵 Đã cộng: **+{amt_vnd:,}đ** (Số dư mới: **{new_bal:,}đ**)",
+                    f"💵 Đã cộng: **+{total_added:,}đ**{bonus_adm} (Số dư mới: **{new_bal:,}đ**)",
                     buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
                 )
                 target_user = db.get_or_create_user(int(dep["user_id"]))
                 u_lang = target_user.get("language", "vi")
                 try:
-                    await client.send_message(
-                        dep["user_id"],
-                        t(u_lang, "deposit_approved_msg", dep_id=dep_id, amt_vnd=amt_vnd, new_bal=new_bal),
-                    )
+                    if bonus_vnd > 0:
+                        msg_txt = t(
+                            u_lang,
+                            "deposit_approved_bonus_msg",
+                            dep_id=dep_id,
+                            amt_vnd=amt_vnd,
+                            bonus_pct=f"{bonus_pct:g}",
+                            bonus_vnd=bonus_vnd,
+                            total_added=total_added,
+                            new_bal=new_bal,
+                        )
+                    else:
+                        msg_txt = t(u_lang, "deposit_approved_msg", dep_id=dep_id, amt_vnd=amt_vnd, new_bal=new_bal)
+                    await client.send_message(dep["user_id"], msg_txt)
                 except Exception:
                     pass
                 return
@@ -2126,7 +2377,70 @@ async def run_bot() -> None:
             await create_and_show_deposit(client, event, amt_vnd)
             return
 
+        if atype == "warranty_request":
+            oid = int(awaiting["order_id"])
+            USER_AWAITING.pop(uid, None)
+            o = db.get_order_by_id(oid, uid)
+            if not o:
+                return
+            clean_keys = format_order_keys_preview(o.get("delivered_keys", ""))
+            ps_oid = o.get("prodseller_order_id") or "N/A"
+            for adm_id in ADMIN_IDS:
+                try:
+                    await client.send_message(
+                        adm_id,
+                        (
+                            f"🛠️ **YÊU CẦU BẢO HÀNH ĐƠN HÀNG #{oid}**\n\n"
+                            f"👤 Khách hàng: `{uid}` (@{u['username']})\n"
+                            f"🛍️ Sản phẩm: **{o['product_name']}** (x{o['quantity']})\n"
+                            f"🔗 Mã đơn ProdSeller: `{ps_oid}`\n"
+                            f"🔑 Key đã giao: `{clean_keys}`\n"
+                            f"📅 Ngày mua: `{o['created_at']}`\n\n"
+                            f"📝 **Mô tả lỗi từ khách:**\n`{text}`"
+                        ),
+                        buttons=[
+                            [
+                                Button.inline(
+                                    f"💬 Phản hồi / Đổi Key đơn #{oid}",
+                                    f"adm:warr_reply:{uid}:{oid}".encode(),
+                                    style="primary",
+                                )
+                            ]
+                        ],
+                    )
+                except Exception:
+                    pass
+            await event.respond(
+                t(lang, "warr_sent", order_id=oid),
+                buttons=[[Button.inline(t(lang, "btn_back"), b"prof:orders")]],
+            )
+            return
+
         if not is_admin(uid):
+            return
+
+        if atype == "admin_warr_reply":
+            target_uid = int(awaiting["target_uid"])
+            oid = int(awaiting["order_id"])
+            USER_AWAITING.pop(uid, None)
+            try:
+                await client.send_message(
+                    target_uid,
+                    (
+                        f"🛠️ **PHẢN HỒI BẢO HÀNH ĐƠN HÀNG `#{oid}`**\n\n"
+                        f"{text}\n\n"
+                        "💚 *Cảm ơn bạn đã tin tưởng sử dụng dịch vụ tại KingTool Shop!*"
+                    ),
+                )
+                await event.respond(
+                    f"✅ Đã gửi phản hồi / tài khoản bảo hành của đơn `#{oid}` tới khách `{target_uid}` thành công!",
+                    buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                )
+            except Exception as exc:
+                await event.respond(
+                    f"❌ Không thể gửi tin nhắn tới `{target_uid}`: `{exc}`",
+                    buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                )
             return
 
         if atype == "admin_vch_add":
@@ -2241,8 +2555,8 @@ async def run_bot() -> None:
 
         if atype == "set_setting":
             key = awaiting["key"]
-            if key in ("markup_percent", "markup_fixed", "vnd_rate"):
-                cleaned = text.lower().replace("%", "").replace("đ", "").replace("vnd", "").replace(",", "").strip()
+            if key in ("markup_percent", "markup_fixed", "vnd_rate", "low_balance_threshold_usd"):
+                cleaned = text.lower().replace("%", "").replace("$", "").replace("đ", "").replace("vnd", "").replace(",", "").strip()
                 try:
                     val = float(cleaned)
                     db.set_setting(key, str(val))
@@ -2252,7 +2566,7 @@ async def run_bot() -> None:
             elif key == "sepay_api_token" and text.strip().lower() == "off":
                 db.set_setting(key, "")
             else:
-                db.set_setting(key, text)
+                db.set_setting(key, text.strip())
             USER_AWAITING.pop(uid, None)
             await event.respond(f"✅ Đã cập nhật `{key}` thành công!")
             await render_admin_home(event, force_new=True)

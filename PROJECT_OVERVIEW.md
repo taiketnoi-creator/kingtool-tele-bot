@@ -117,7 +117,13 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 - Cung cấp mã `ktk_...` riêng cho từng khách hàng tại nút `API` trên Bot (hỗ trợ `👁 Hiện toàn bộ Key`, `♻️ Tạo lại Key mới`, `💡 Hướng dẫn dễ hiểu` và trang web `/api-docs`).
 - Hỗ trợ 6 cổng REST API chuẩn (`GET /v1/balance`, `GET /v1/products`, `GET /v1/products/:id`, `POST /v1/orders`, `GET /v1/orders`, `GET /v1/orders/:id`) giúp các chủ Website/Bot đại lý con đấu nối lấy hàng tự động bằng số dư ví VNĐ.
 
-### 5.5. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
+### 5.5. Bộ 4 Tính Năng Vận Hành Tự Động & CSKH (`v2.5.0`)
+- **Cảnh báo sắp hết vốn ProdSeller (`low_balance_threshold_usd`):** Báo động về Telegram Admin khi số dư vốn USDT tại `@ProdSellerBot` thấp hơn ngưỡng cài đặt (mặc định `$5.00`).
+- **Tự động đăng thông báo Hàng Về (Restock) lên Kênh (`restock_notify_enabled`):** Khi sản phẩm từ hết hàng (`0`) chuyển sang có hàng (`> 0`), tự động đăng thông báo lên `@KingToolShopOfficial` kèm nút Deep-link `?start=BUY_<product_id>` mở thẳng màn hình mua sản phẩm.
+- **Khuyến mãi nạp tiền theo mốc (`deposit_bonus_enabled`, `deposit_bonus_tiers`):** Tự động cộng thêm `%` tiền thưởng khi khách nạp đạt mốc (mặc định `200,000đ -> +5%`, `500,000đ -> +10%`), áp dụng cho cả duyệt tay và SePay ban đêm.
+- **Bảo hành 1 chạm & Phản hồi trực tiếp (`warr:ask:<id>` / `adm:warr_reply:`):** Khách bấm nút bảo hành ngay trong lịch sử đơn hàng, Admin nhận phiếu kèm mã đơn ProdSeller và bấm nút phản hồi/đổi Key trực tiếp qua Bot.
+
+### 5.6. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
 - Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s), `vouchers` (TTL 60s), `api_keys` (TTL 45s) và `users` (TTL 45s).
 - Tuyệt đối **KHÔNG** thực hiện truy vấn SQL lặp trong vòng lặp hiển thị danh sách sản phẩm (tránh lỗi N+1 Query).
 - `prodseller_client.py` sử dụng cơ chế **Stale-While-Revalidate**: trả về danh sách sản phẩm từ RAM ngay lập tức (`force=False`) và đồng bộ ngầm mỗi 45 giây.
@@ -126,9 +132,10 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 
 ## 6. Định Hướng Phát Triển Tiếp Theo (Roadmap)
 
-- **Tính năng đã hoàn thành gần nhất (`v2.3.0` & `v2.4.0`):**
+- **Tính năng đã hoàn thành gần nhất (`v2.3.0`, `v2.4.0` & `v2.5.0`):**
   - **Hệ thống Mã Giảm Giá (Voucher System - bảng `telebot.vouchers` & `telebot.voucher_usages`)** kèm chốt chặn bảo vệ giá vốn (`total_final_vnd >= total_cost_vnd`).
   - **Cổng Public Reseller API v1 (`public_api.py` - bảng `telebot.api_keys`) & Trang tài liệu `/api-docs`** kèm mục giải thích dễ hiểu cho khách hàng trên Bot.
+  - **Bộ 4 tính năng vận hành tự động (`v2.5.0`):** Cảnh báo hết vốn ProdSeller, Tự động đăng Restock lên Kênh kèm Deep-link mua ngay, Khuyến mãi nạp tiền theo mốc, và Bảo hành 1 chạm trong Lịch sử đơn hàng.
 
 ---
 

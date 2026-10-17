@@ -5,6 +5,25 @@
 
 ---
 
+## [v2.5.0] - 2026-10-17: Bộ 4 Tính Năng Vận Hành Tự Động & Tăng Doanh Thu (Cảnh Báo Vốn, Báo Restock Kênh, Khuyến Mãi Nạp Tiền, Bảo Hành 1 Chạm)
+
+### 🚀 4 Nâng cấp vận hành & bán hàng tự động
+1. **🔔 Cảnh báo "Số dư Vốn ProdSeller sắp hết" cho Admin (`low_balance_threshold_usd`):**
+   - Tự động kiểm tra số dư ví USDT bên `@ProdSellerBot` ngay sau mỗi đơn hàng và định kỳ trong vòng lặp đồng bộ.
+   - Khi số dư vốn tụt xuống dưới ngưỡng cài đặt (mặc định `$5.00`, có cooldown 4 giờ chống spam), Bot lập tức gửi báo động khẩn cấp về Telegram Admin để kịp nạp vốn trước khi khách mua bị lỗi.
+2. **📣 Tự động đăng thông báo "Hàng Về (Restock)" lên Kênh `@KingToolShopOfficial` (`restock_notify_enabled`):**
+   - Vòng lặp `poll_products_sync_loop` theo dõi biến động tồn kho `_LAST_KNOWN_STOCK` mỗi 60 giây.
+   - Khi phát hiện sản phẩm đang hết hàng (`0`) có hàng trở lại (`> 0`), Bot tự động đăng bài báo Restock lên kênh kèm nút **Deep-link `🛒 Mua ngay`** (`?start=BUY_<product_id>`) mở thẳng màn hình mua sản phẩm đó trong 1 chạm.
+3. **🎁 Khuyến mãi Nạp Tiền tự động theo mốc (`deposit_bonus_enabled`, `deposit_bonus_tiers`):**
+   - Mặc định tặng thêm **`+5%`** khi nạp từ `200,000đ` và **`+10%`** khi nạp từ `500,000đ` (hiển thị nhãn `🎁 (+5%)`, `🎁 (+10%)` trực tiếp trên nút chọn mệnh giá nạp tiền).
+   - Tự động cộng tiền thưởng vào ví khách hàng cả khi Admin bấm `✅ Duyệt` lẫn khi SePay tự động duyệt ban đêm (`23h-06h`).
+4. **🛠️ Nút "Bảo hành / Báo lỗi đơn hàng 1 chạm" & Phản hồi trực tiếp (`warr:ask:<id>` & `adm:warr_reply:`):**
+   - Trong mục `👤 Hồ sơ -> 📦 Đơn hàng đã mua`, mỗi đơn hàng có nút `🛠️ Bảo hành #<id>`.
+   - Khách bấm vào và nhập mô tả lỗi -> Bot gửi ngay phiếu yêu cầu bảo hành đầy đủ thông tin (kèm mã đơn gốc `prodseller_order_id` và Key đã giao) về Telegram Admin.
+   - Admin chỉ cần bấm nút **`💬 Phản hồi / Đổi Key đơn #<id>`** ngay dưới thông báo để gửi Key bảo hành mới hoặc tin nhắn hỗ trợ trực tiếp tới khách qua Bot.
+
+---
+
 ## [v2.4.0] - 2026-10-17: Cổng Public Reseller API v1 (`/v1/*`), Trang Tài Liệu `/api-docs` & Hướng Dẫn Dễ Hiểu Cho Khách Hàng
 
 ### 🔌 Tính năng Public Reseller API v1 (Đồng bộ 100% cấu trúc `@ProdSellerBot`)

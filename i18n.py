@@ -78,6 +78,16 @@ STRINGS: dict[str, dict[str, str]] = {
             "💰 Số dư hiện tại: **{new_bal:,}đ**\n\n"
             "Bấm /start để bắt đầu mua hàng ngay!"
         ),
+        "deposit_approved_bonus_msg": (
+            "✅ **Nạp tiền thành công (Kèm Thưởng Khuyến Mãi)!**\n\n"
+            "🧾 Mã đơn nạp: `#{dep_id}`\n"
+            "💵 Tiền nạp gốc: **+{amt_vnd:,}đ**\n"
+            "🎁 Thưởng nạp (+{bonus_pct:g}%): **+{bonus_vnd:,}đ**\n"
+            "💰 Tổng cộng vào ví: **+{total_added:,}đ**\n"
+            "🏦 Số dư hiện tại: **{new_bal:,}đ**\n\n"
+            "Bấm /start để bắt đầu mua hàng ngay!"
+        ),
+        "deposit_bonus_banner": "\n\n🎁 **KHUYẾN MÃI NẠP TIỀN TỰ ĐỘNG:**\n{tiers_text}",
         "deposit_rejected_msg": "❌ Yêu cầu nạp tiền `#{dep_id}` ({amt_vnd:,}đ) chưa nhận được thanh toán hoặc bị từ chối.",
         "profile_title": (
             "👤 **Hồ sơ của bạn**\n\n"
@@ -94,7 +104,19 @@ STRINGS: dict[str, dict[str, str]] = {
         "my_orders_btn": "📦 Đơn hàng đã mua",
         "referral_btn": "👥 Giới thiệu nhận hoa hồng",
         "orders_empty": "📦 Bạn chưa có đơn hàng nào.",
-        "orders_history_title": "📦 **LỊCH SỬ ĐƠN HÀNG GẦN ĐÂY:**\n",
+        "orders_history_title": "📦 **LỊCH SỬ ĐƠN HÀNG GẦN ĐÂY:**\n*(💡 Bấm nút **🛠️ Bảo hành #...** bên dưới nếu đơn hàng của bạn gặp sự cố cần hỗ trợ)*\n",
+        "warr_btn": "🛠️ Bảo hành #{order_id}",
+        "warr_prompt": (
+            "🛠️ **YÊU CẦU BẢO HÀNH / HỖ TRỢ ĐƠN HÀNG #{order_id}**\n\n"
+            "🛍️ Sản phẩm: **{name}**\n"
+            "🔑 Key/Tài khoản: `{keys}`\n\n"
+            "✍️ Vui lòng **nhập mô tả tình trạng lỗi** bạn đang gặp phải (ví dụ: *sai mật khẩu, bị văng gói, chưa nhận được mail...*) để gửi trực tiếp cho Admin xử lý:"
+        ),
+        "warr_sent": (
+            "✅ **Đã gửi phiếu yêu cầu bảo hành đơn `#{order_id}` tới Admin!**\n\n"
+            "📝 Nội dung báo lỗi: `{issue}`\n"
+            "⏳ Hệ thống sẽ kiểm tra và gửi phản hồi / đổi bảo hành cho bạn ngay trên Bot này sớm nhất!"
+        ),
         "referral_info": (
             "👥 **CHƯƠNG TRÌNH GIỚI THIỆU BẠN BÈ**\n\n"
             "🔗 Link giới thiệu của bạn:\n`{ref_link}`\n\n"
@@ -230,6 +252,16 @@ STRINGS: dict[str, dict[str, str]] = {
             "💰 Current Balance: **{new_bal:,}đ**\n\n"
             "Send /start to start shopping now!"
         ),
+        "deposit_approved_bonus_msg": (
+            "✅ **Deposit Approved (With Bonus)!**\n\n"
+            "🧾 Deposit ID: `#{dep_id}`\n"
+            "💵 Deposit Amount: **+{amt_vnd:,}đ**\n"
+            "🎁 Bonus (+{bonus_pct:g}%): **+{bonus_vnd:,}đ**\n"
+            "💰 Total Credited: **+{total_added:,}đ**\n"
+            "🏦 Current Balance: **{new_bal:,}đ**\n\n"
+            "Send /start to start shopping now!"
+        ),
+        "deposit_bonus_banner": "\n\n🎁 **DEPOSIT BONUS TIERS:**\n{tiers_text}",
         "deposit_rejected_msg": "❌ Deposit request `#{dep_id}` ({amt_vnd:,}đ) was not received or was declined.",
         "profile_title": (
             "👤 **Your Profile**\n\n"
@@ -246,7 +278,19 @@ STRINGS: dict[str, dict[str, str]] = {
         "my_orders_btn": "📦 My Orders",
         "referral_btn": "👥 Referral & Commission",
         "orders_empty": "📦 You have no orders yet.",
-        "orders_history_title": "📦 **RECENT ORDER HISTORY:**\n",
+        "orders_history_title": "📦 **RECENT ORDER HISTORY:**\n*(💡 Tap **🛠️ Warranty #...** below if any order needs support)*\n",
+        "warr_btn": "🛠️ Warranty #{order_id}",
+        "warr_prompt": (
+            "🛠️ **WARRANTY / SUPPORT REQUEST FOR ORDER #{order_id}**\n\n"
+            "🛍️ Product: **{name}**\n"
+            "🔑 Delivered Key: `{keys}`\n\n"
+            "✍️ Please **describe the issue** you are experiencing (e.g., *wrong password, subscription expired early...*) to send directly to Admin:"
+        ),
+        "warr_sent": (
+            "✅ **Warranty request for order `#{order_id}` has been sent to Admin!**\n\n"
+            "📝 Issue reported: `{issue}`\n"
+            "⏳ Our team will check and reply to you right here on the Bot as soon as possible!"
+        ),
         "referral_info": (
             "👥 **REFERRAL PROGRAM**\n\n"
             "🔗 Your referral link:\n`{ref_link}`\n\n"
