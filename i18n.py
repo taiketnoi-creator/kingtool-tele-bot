@@ -637,6 +637,37 @@ PRODUCT_DESC_VI: dict[str, str] = {
         "🔻 Hỗ trợ chữ ký số (Digital Signatures), không quảng cáo & tặng kèm 2,000 AI Credits.\n"
         "⚡ **Hướng dẫn:** Đăng nhập vào website iLovePDF bằng `email:password` được cấp và đổi mật khẩu của bạn."
     ),
+    "6ad28e5f81c3116d4ec96db6": (
+        "🛡️ **Key HMA VPN (20 - 30 Ngày) — Bảo hành Full**\n\n"
+        "💎 **Mô tả sản phẩm:**\n"
+        "• Mã Key kích hoạt trực tiếp trên **Android và Máy tính (PC)**.\n"
+        "⚠️ *Lưu ý: Đây là định dạng Key nên không sử dụng cho thiết bị iOS (iPhone/iPad).*"
+    ),
+    "6ad1e30eb2ca69ae7f674aff": (
+        "▶️ **Tài khoản YouTube Premium 1 Tháng (Full quyền truy cập Gmail)**\n\n"
+        "• Giao toàn quyền truy cập tài khoản Gmail đi kèm.\n"
+        "⚠️ **Lưu ý quan trọng khi sử dụng:**\n"
+        "• Vui lòng đổi mật khẩu ngay sau khi nhận tài khoản.\n"
+        "• Tuyệt đối **không chỉnh sửa hoặc can thiệp vào phương thức thanh toán** trong tài khoản.\n"
+        "• Khuyến khích thêm số điện thoại và email khôi phục cá nhân của bạn để bảo mật tốt nhất."
+    ),
+    "6acbec9eed778615e4fa8fdc": (
+        "🎵 **Tài khoản Muse AI (Gói khủng 31 Tỷ Token)**\n\n"
+        "• Tạo ảnh AI & Tạo video AI chất lượng cao với hạn mức lên tới **31 Tỷ Token**.\n"
+        "• Giao tài khoản tự động ngay sau khi thanh toán."
+    ),
+    "6a9008ee63bcf8795dfebd88": (
+        "📐 **Tài khoản Autodesk Admin Panel (3,000 Lượt mời - Thời hạn 3 Năm)**\n\n"
+        "• Định dạng giao: `email(gmail) | mật_khẩu_gmail | mật_khẩu_autodesk`\n"
+        "• Đăng nhập vào Gmail trước, sau đó đăng nhập vào Autodesk.\n\n"
+        "📋 **Hướng dẫn sử dụng & Bảo mật:**\n"
+        "🔹 **Bước 1 (Đăng nhập Autodesk):** Truy cập https://manage.autodesk.com bằng email và mật khẩu được cấp.\n"
+        "🔹 **Bước 2 (Đổi sang Email & Mật khẩu cá nhân):** Cập nhật ngay thông tin bảo mật tại https://profile.autodesk.com/security\n"
+        "🔹 **Bước 3 (Kích hoạt phần mềm AutoCAD, Revit, 3ds Max...):** Truy cập https://www.autodesk.com/education/edu-software/overview\n"
+        "🔹 **Bước 4 (Quản lý & Mời tới 3,000 thành viên):** Mời người dùng tại https://manage.autodesk.com/uma/user-list/users\n"
+        "🔹 **Bước 5 (Kiểm tra thời hạn bản quyền):** Xem tại https://manage.autodesk.com/billing/subscription-management\n\n"
+        "💡 *Lưu ý: Hãy đổi sang email cá nhân ngay trong lần đăng nhập đầu tiên. Tài khoản cực kỳ ổn định, bảo hành đăng nhập.*"
+    ),
 }
 
 

@@ -59,6 +59,8 @@ PRODUCT_KEYWORD_ICONS: list[tuple[str, int | None, str]] = [
     ("canva", 5879982576671657703, "🖌️ "),
     ("office 365", 6102808052673548025, "💼 "),
     ("microsoft", 6102808052673548025, "💼 "),
+    ("youtube", None, "▶️ "),
+    ("hma", None, "🛡️ "),
 ]
 
 
