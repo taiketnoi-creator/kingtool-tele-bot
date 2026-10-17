@@ -520,7 +520,7 @@ async def handle_http_request(
                         {
                             "id": pid,
                             "name": str(p.get("name", "")),
-                            "description": localize_product_description(p.get("description", ""), lang),
+                            "description": localize_product_description(pid, p.get("description", ""), lang),
                             "price": vip_vnd,
                             "publicPrice": base_vnd,
                             "currency": "VND",
@@ -553,7 +553,7 @@ async def handle_http_request(
                     {
                         "id": pid,
                         "name": str(p.get("name", "")),
-                        "description": localize_product_description(p.get("description", ""), lang),
+                        "description": localize_product_description(pid, p.get("description", ""), lang),
                         "price": vip_vnd,
                         "publicPrice": base_vnd,
                         "currency": "VND",
