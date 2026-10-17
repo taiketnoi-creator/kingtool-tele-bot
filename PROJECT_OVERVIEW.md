@@ -74,12 +74,16 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
    - `id BIGSERIAL PRIMARY KEY`, `user_id BIGINT`, `username`, `amount_usd`, `amount_vnd BIGINT`, `method` (`vietqr`), `memo` (`KINGTOOL CAM ON SPX...`), `status` (`pending`/`approved`/`rejected`/`expired`), `created_at`, `updated_at`.
 5. **`telebot.orders`**:
    - `id BIGSERIAL PRIMARY KEY`, `user_id BIGINT`, `username`, `product_id`, `product_name`, `quantity`, `wholesale_cost`, `retail_price`, `profit`, `prodseller_order_id`, `status` (`paid`/`delivered`), `delivered_keys` (JSON array), `activation_email`, `created_at`.
+6. **`telebot.vouchers`**:
+   - `code TEXT PRIMARY KEY`, `discount_type TEXT` (`percent` / `fixed`), `discount_value NUMERIC(18,2)`, `max_uses INTEGER` (`0` = không giới hạn), `used_count INTEGER`, `active INTEGER` (`1` = bật, `0` = tắt), `created_at TEXT`.
+7. **`telebot.voucher_usages`**:
+   - `id BIGSERIAL PRIMARY KEY`, `code TEXT`, `user_id BIGINT`, `order_id BIGINT`, `discount_amount BIGINT`, `used_at TEXT`, `UNIQUE(code, user_id)` (mỗi khách chỉ được dùng 1 lần cho mỗi mã).
 
 ---
 
 ## 5. Các Nghiệp Vụ & Thuật Toán Quan Trọng
 
-### 5.1. Công thức Giá bán, Hạng VIP & Bảo vệ Giá vốn
+### 5.1. Công thức Giá bán, Hạng VIP, Mã Giảm Giá (Voucher) & Bảo vệ Giá vốn
 - **Giá vốn VNĐ (`cost_vnd`)**: `round(wholesale_usd * vnd_rate)`.
 - **Giá bán lẻ niêm yết (`base_vnd`)**:
   - Nếu sản phẩm có `custom_price` trong `product_overrides` -> dùng `custom_price`.
@@ -88,8 +92,12 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
   - `BRONZE` (< `600,000đ` chi tiêu): giảm `0%`.
   - `SILVER` (>= `600,000đ` chi tiêu): giảm `3%`.
   - `GOLD` (>= `2,500,000đ` chi tiêu): giảm `5%`.
+- **Mã giảm giá (`Voucher System` - `compute_order_pricing`)**:
+  - Khách hàng bấm `🎟️ Nhập mã giảm giá (Voucher)` ngay trên nút `💳 Mua ngay` ở màn hình Chi tiết sản phẩm.
+  - Hỗ trợ giảm theo `%` (làm tròn bậc `500đ`) hoặc giảm số tiền VNĐ cố định, kiểm tra số lượt tối đa (`max_uses`) và giới hạn mỗi khách 1 lần/mã (`telebot.voucher_usages`).
+  - Admin quản lý trực tiếp trong `/admin` -> `🎟️ Quản lý Voucher` (Tạo mã nhanh 5 giây, Bật/Tắt 1 chạm, Xóa mã).
 - **🛡️ Nguyên tắc bất khả xâm phạm (Chống lỗ vốn):**
-  - Mọi mức giảm giá (VIP hoặc Voucher) đều phải qua chốt chặn `final_vnd = max(cost_vnd, discounted_price)`. Giá thu của khách **không bao giờ thấp hơn giá vốn đại lý**.
+  - Mọi mức giảm giá (VIP + Voucher kết hợp) đều phải qua chốt chặn `total_final_vnd = max(total_cost_vnd, raw_after_voucher)`. Giá thu của khách **không bao giờ thấp hơn giá vốn đại lý**.
 
 ### 5.2. Điểm thưởng (Cashback Points) & Link Giới Thiệu (Referral)
 - **Tích điểm khi mua hàng:** Mỗi `10,000đ` chi tiêu = `+1 điểm` (tối thiểu `1 điểm`/đơn).
@@ -104,7 +112,7 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
   - **Ban đêm (`23:00` – `05:59` sáng):** Nếu đã cài `sepay_api_token` và chưa dùng hết 50 lượt/tháng, vòng lặp `poll_night_sepay_deposits_loop` tự động quét API SePay mỗi 30 giây, khớp mã `SPX...` và số tiền để cộng số dư tự động khi Admin đang ngủ.
 
 ### 5.4. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
-- Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s) và `users` (TTL 45s).
+- Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s), `vouchers` (TTL 60s) và `users` (TTL 45s).
 - Tuyệt đối **KHÔNG** thực hiện truy vấn SQL lặp trong vòng lặp hiển thị danh sách sản phẩm (tránh lỗi N+1 Query).
 - `prodseller_client.py` sử dụng cơ chế **Stale-While-Revalidate**: trả về danh sách sản phẩm từ RAM ngay lập tức (`force=False`) và đồng bộ ngầm mỗi 45 giây.
 
@@ -112,12 +120,8 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 
 ## 6. Định Hướng Phát Triển Tiếp Theo (Roadmap)
 
-- **Tính năng đã thống nhất thiết kế (Sẵn sàng triển khai):**
-  - **Hệ thống Mã Giảm Giá (Voucher System - bảng `telebot.vouchers` & `telebot.voucher_usages`)**:
-    - Cho phép khách nhập mã Voucher tại màn hình Chi tiết sản phẩm trước khi bấm Mua.
-    - Hỗ trợ giảm theo `%` hoặc giảm số tiền VNĐ cố định, giới hạn số lượt dùng tối đa, mỗi user dùng 1 lần/mã.
-    - Tích hợp quản lý tạo/xóa mã ngay trong `/admin`.
-    - Vẫn giữ nguyên chốt chặn bảo vệ giá vốn (`final_price >= cost_vnd`).
+- **Tính năng đã hoàn thành gần nhất (`v2.3.0`):**
+  - **Hệ thống Mã Giảm Giá (Voucher System - bảng `telebot.vouchers` & `telebot.voucher_usages`)** kèm chốt chặn bảo vệ giá vốn (`total_final_vnd >= total_cost_vnd`).
 
 ---
 

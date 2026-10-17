@@ -56,7 +56,9 @@ TIER_DISCOUNTS: dict[str, int] = {
     "gold": 5,
 }
 
-_TABLE_NAME_RE = re.compile(r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders)\b(?![.'\"_])")
+_TABLE_NAME_RE = re.compile(
+    r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders|vouchers|voucher_usages)\b(?![.'\"_])"
+)
 
 
 def now_str() -> str:
@@ -106,6 +108,8 @@ class Database:
         self._settings_cache_ts: float = 0.0
         self._overrides_cache: dict[str, dict[str, Any]] | None = None
         self._overrides_cache_ts: float = 0.0
+        self._vouchers_cache: dict[str, dict[str, Any]] | None = None
+        self._vouchers_cache_ts: float = 0.0
         self._users_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         self._init_db()
 
@@ -262,6 +266,26 @@ class Database:
                         activation_email TEXT DEFAULT '',
                         created_at TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS vouchers (
+                        code TEXT PRIMARY KEY,
+                        discount_type TEXT NOT NULL DEFAULT 'percent',
+                        discount_value NUMERIC(18, 2) NOT NULL DEFAULT 0,
+                        max_uses INTEGER NOT NULL DEFAULT 0,
+                        used_count INTEGER NOT NULL DEFAULT 0,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS voucher_usages (
+                        id BIGSERIAL PRIMARY KEY,
+                        code TEXT NOT NULL,
+                        user_id BIGINT NOT NULL,
+                        order_id BIGINT NOT NULL DEFAULT 0,
+                        discount_amount BIGINT NOT NULL DEFAULT 0,
+                        used_at TEXT NOT NULL,
+                        UNIQUE(code, user_id)
+                    );
                     """
                 )
                 for k, v in DEFAULT_SETTINGS.items():
@@ -327,6 +351,26 @@ class Database:
                         delivered_keys TEXT DEFAULT '[]',
                         activation_email TEXT DEFAULT '',
                         created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS vouchers (
+                        code TEXT PRIMARY KEY,
+                        discount_type TEXT NOT NULL DEFAULT 'percent',
+                        discount_value REAL NOT NULL DEFAULT 0,
+                        max_uses INTEGER NOT NULL DEFAULT 0,
+                        used_count INTEGER NOT NULL DEFAULT 0,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS voucher_usages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        code TEXT NOT NULL,
+                        user_id INTEGER NOT NULL,
+                        order_id INTEGER NOT NULL DEFAULT 0,
+                        discount_amount INTEGER NOT NULL DEFAULT 0,
+                        used_at TEXT NOT NULL,
+                        UNIQUE(code, user_id)
                     );
                     """
                 )
@@ -744,6 +788,217 @@ class Database:
         if final_vnd >= base_vnd:
             return base_vnd, base_vnd, 0
         return base_vnd, final_vnd, disc_pct
+
+    # --- Vouchers (Mã Giảm Giá + Chốt chặn chống lỗ vốn + RAM Cache 60s) ---
+    def get_all_vouchers(self) -> dict[str, dict[str, Any]]:
+        import time
+
+        now = time.monotonic()
+        if self._vouchers_cache is not None and (now - self._vouchers_cache_ts < 60.0):
+            return dict(self._vouchers_cache)
+        with self._conn() as conn:
+            rows = conn.execute("SELECT * FROM vouchers ORDER BY created_at DESC").fetchall()
+            res = {str(r["code"]).upper(): dict(r) for r in rows}
+            self._vouchers_cache = res
+            self._vouchers_cache_ts = now
+            return dict(res)
+
+    def get_voucher(self, code: str) -> dict[str, Any] | None:
+        c = (code or "").strip().upper()
+        if not c:
+            return None
+        return self.get_all_vouchers().get(c)
+
+    def create_or_update_voucher(
+        self,
+        code: str,
+        discount_type: str,
+        discount_value: float,
+        max_uses: int = 0,
+    ) -> dict[str, Any]:
+        c = code.strip().upper()
+        dtype = "percent" if discount_type == "percent" else "fixed"
+        dval = round(float(discount_value), 2)
+        m_uses = max(0, int(max_uses))
+        created = now_str()
+        with self._conn() as conn:
+            conn.execute(
+                """
+                INSERT INTO vouchers (code, discount_type, discount_value, max_uses, used_count, active, created_at)
+                VALUES (?, ?, ?, ?, 0, 1, ?)
+                ON CONFLICT(code) DO UPDATE SET
+                    discount_type = excluded.discount_type,
+                    discount_value = excluded.discount_value,
+                    max_uses = excluded.max_uses,
+                    active = 1
+                """,
+                (c, dtype, dval, m_uses, created),
+            )
+        self._vouchers_cache = None
+        return self.get_voucher(c) or {
+            "code": c,
+            "discount_type": dtype,
+            "discount_value": dval,
+            "max_uses": m_uses,
+            "used_count": 0,
+            "active": 1,
+            "created_at": created,
+        }
+
+    def toggle_voucher_active(self, code: str) -> bool:
+        c = code.strip().upper()
+        with self._conn() as conn:
+            row = conn.execute("SELECT active FROM vouchers WHERE code = ?", (c,)).fetchone()
+            if not row:
+                return False
+            new_val = 0 if int(row["active"] or 0) == 1 else 1
+            conn.execute("UPDATE vouchers SET active = ? WHERE code = ?", (new_val, c))
+        self._vouchers_cache = None
+        return bool(new_val)
+
+    def delete_voucher(self, code: str) -> bool:
+        c = code.strip().upper()
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM vouchers WHERE code = ?", (c,))
+            conn.execute("DELETE FROM voucher_usages WHERE code = ?", (c,))
+            deleted = cur.rowcount > 0
+        self._vouchers_cache = None
+        return deleted
+
+    def has_user_used_voucher(self, code: str, user_id: int) -> bool:
+        c = (code or "").strip().upper()
+        if not c:
+            return False
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT 1 AS used FROM voucher_usages WHERE code = ? AND user_id = ?",
+                (c, user_id),
+            ).fetchone()
+            return bool(row)
+
+    def validate_voucher_for_user(
+        self,
+        code: str,
+        user_id: int | None = None,
+    ) -> tuple[bool, str, dict[str, Any] | None]:
+        """Kiểm tra mã giảm giá hợp lệ cho khách hàng:
+        Trả về (hợp_lệ, mã_lý_do, thông_tin_voucher).
+        Các mã lý do: 'ok', 'not_found', 'inactive', 'exhausted', 'already_used'.
+        """
+        c = (code or "").strip().upper()
+        if not c:
+            return False, "not_found", None
+        v = self.get_voucher(c)
+        if not v:
+            return False, "not_found", None
+        if int(v.get("active", 0) or 0) != 1:
+            return False, "inactive", v
+        max_u = int(v.get("max_uses", 0) or 0)
+        used_u = int(v.get("used_count", 0) or 0)
+        if max_u > 0 and used_u >= max_u:
+            return False, "exhausted", v
+        if user_id is not None and self.has_user_used_voucher(c, user_id):
+            return False, "already_used", v
+        return True, "ok", v
+
+    def redeem_voucher_atomic(
+        self,
+        code: str,
+        user_id: int,
+        order_id: int,
+        discount_amount: int,
+    ) -> bool:
+        """Ghi nhận lượt sử dụng mã giảm giá của khách hàng sau khi mua thành công."""
+        c = (code or "").strip().upper()
+        if not c:
+            return False
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO voucher_usages (code, user_id, order_id, discount_amount, used_at)
+                VALUES (?, ?, ?, ?, ?)
+                ON CONFLICT(code, user_id) DO NOTHING
+                """,
+                (c, user_id, order_id, int(discount_amount), now_str()),
+            )
+            if cur.rowcount == 1:
+                conn.execute(
+                    "UPDATE vouchers SET used_count = used_count + 1 WHERE code = ?",
+                    (c,),
+                )
+                self._vouchers_cache = None
+                return True
+        return False
+
+    def compute_order_pricing(
+        self,
+        product_id: str,
+        wholesale_usd: float,
+        qty: int = 1,
+        tier: str = "bronze",
+        voucher_code: str | None = None,
+        user_id: int | None = None,
+        overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> dict[str, Any]:
+        """Tính toán chi tiết giá đơn hàng (kết hợp Hạng VIP + Mã Giảm Giá Voucher).
+        🛡️ Chốt chặn chống lỗ vốn: Tổng tiền thanh toán cuối cùng (total_final_vnd)
+        LUÔN >= Tổng giá vốn đại lý (total_cost_vnd).
+        """
+        qty = max(1, int(qty))
+        unit_cost_vnd = self.compute_wholesale_vnd(wholesale_usd)
+        total_cost_vnd = self.compute_wholesale_vnd(wholesale_usd * qty)
+        base_unit_vnd, vip_unit_vnd, vip_disc_pct = self.compute_tier_unit_price(
+            product_id, wholesale_usd, tier, overrides
+        )
+        total_base_vnd = base_unit_vnd * qty
+        total_vip_vnd = max(total_cost_vnd, vip_unit_vnd * qty)
+
+        voucher_valid = False
+        voucher_reason = ""
+        applied_code = ""
+        voucher_discount_vnd = 0
+        floor_capped = False
+        total_final_vnd = total_vip_vnd
+
+        if voucher_code:
+            ok, reason, v = self.validate_voucher_for_user(voucher_code, user_id)
+            voucher_reason = reason
+            if ok and v:
+                voucher_valid = True
+                applied_code = str(v["code"]).upper()
+                dtype = str(v.get("discount_type", "percent"))
+                dval = float(v.get("discount_value", 0) or 0)
+                if dtype == "percent":
+                    raw_disc = int(round(total_vip_vnd * (dval / 100.0) / 500.0) * 500)
+                    if raw_disc == 0 and dval > 0:
+                        raw_disc = int(round(total_vip_vnd * (dval / 100.0)))
+                else:
+                    raw_disc = int(round(dval))
+
+                raw_final = total_vip_vnd - raw_disc
+                if raw_final < total_cost_vnd:
+                    floor_capped = True
+                    total_final_vnd = total_cost_vnd
+                else:
+                    total_final_vnd = raw_final
+                voucher_discount_vnd = max(0, total_vip_vnd - total_final_vnd)
+
+        return {
+            "qty": qty,
+            "unit_cost_vnd": unit_cost_vnd,
+            "total_cost_vnd": total_cost_vnd,
+            "base_unit_vnd": base_unit_vnd,
+            "vip_unit_vnd": vip_unit_vnd,
+            "vip_disc_pct": vip_disc_pct,
+            "total_base_vnd": total_base_vnd,
+            "total_vip_vnd": total_vip_vnd,
+            "total_final_vnd": total_final_vnd,
+            "voucher_valid": voucher_valid,
+            "voucher_code": applied_code,
+            "voucher_discount_vnd": voucher_discount_vnd,
+            "voucher_reason": voucher_reason,
+            "floor_capped": floor_capped,
+        }
 
     # --- Deposits & SePay Night-Shift Auto-Approval ---
     def is_in_night_auto_window(self) -> bool:

@@ -5,6 +5,25 @@
 
 ---
 
+## [v2.3.0] - 2026-10-17: Hệ Thống Mã Giảm Giá (Voucher System) & Chốt Chặn Chống Lỗ Vốn Tuyệt Đối
+
+### 🎟️ Tính năng Mã Giảm Giá (Voucher System)
+- **Cơ sở dữ liệu (`database.py` - Schema `telebot`):**
+  - Bổ sung 2 bảng mới `telebot.vouchers` và `telebot.voucher_usages` vào `_TABLE_NAME_RE` và `_init_db()` (tương thích song song Supabase PostgreSQL & SQLite Local, giữ nguyên vẹn 100% Schema `public` của `Base Family`).
+  - Tích hợp **Write-Through RAM Cache** (`_vouchers_cache`, TTL 60s) đảm bảo kiểm tra và tính giá Voucher tức thì không phát sinh truy vấn mạng lặp.
+  - Xây dựng hàm `compute_order_pricing()` kết hợp đồng thời **Chiết khấu Hạng VIP (`Silver 3%`, `Gold 5%`)** + **Mã Giảm Giá Voucher (Giảm `%` hoặc Giảm tiền mặt VNĐ cố định)**.
+- **🛡️ Chốt chặn chống lỗ vốn (`Anti-Loss Floor Protection`):**
+  - Thiết lập khóa an toàn cứng `total_final_vnd = max(total_cost_vnd, raw_after_voucher)`: Dù khách hàng có Hạng VIP cao nhất cộng thêm mã giảm giá sâu, số tiền thanh toán cuối cùng **không bao giờ thấp hơn giá vốn đại lý (`cost_vnd`)** từ `@ProdSellerBot`.
+- **Giao diện Khách hàng (`bot.py` & `i18n.py`):**
+  - Ngay trên nút `💳 Mua ngay — ...đ` ở màn hình Chi tiết sản phẩm, thêm nút `🎟️ Nhập mã giảm giá (Voucher)`.
+  - Kiểm tra tự động: mã tồn tại, đang bật, còn lượt sử dụng (`used_count < max_uses`), và mỗi khách chỉ được dùng 1 lần/mã (`UNIQUE(code, user_id)`).
+  - Khi áp mã hợp lệ: tự động gạch ngang giá cũ (`~78,000đ~`), hiển thị mức tiết kiệm và đổi nút thành `🎟️ Đang áp mã: SALE20 (-15,000đ) [❌ Bỏ mã]`, đồng thời cập nhật ngay số tiền trên nút `💳 Mua ngay`.
+- **Bảng điều khiển Admin (`/admin`):**
+  - Thêm mục `🎟️ Quản lý Voucher` hỗ trợ tạo mã mới trong 5 giây theo cú pháp `MÃ_CODE | MỨC_GIẢM | SỐ_LƯỢT_TỐI_ĐA` (ví dụ: `SALE20 | 20% | 50` hoặc `GIAM15K | 15k | 20`).
+  - Hiển thị danh sách mã kèm tiến độ lượt dùng (`3/20 lượt`) và các nút thao tác nhanh 1 chạm: `🔴 Tắt` / `🟢 Bật` và `🗑️ Xóa`.
+
+---
+
 ## [v2.2.0] - 2026-10-16: Tối Ưu Hóa Tốc Độ Phản Hồi Tức Thì (`0.15ms`) & Chuẩn Hóa Tài Liệu AI Agent
 
 ### ⚡ Tối ưu hiệu năng (Performance)

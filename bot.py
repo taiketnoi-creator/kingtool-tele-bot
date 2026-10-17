@@ -58,6 +58,7 @@ ADMIN_IDS: set[int] = {
 }
 
 USER_AWAITING: dict[int, dict[str, Any]] = {}
+USER_ACTIVE_VOUCHER: dict[int, str] = {}
 USER_PURCHASE_LOCKS: dict[int, asyncio.Lock] = {}
 DEPOSIT_NOTIFIED_AT: dict[int, float] = {}
 BOT_USERNAME_CACHE: str = "KingToolShop_bot"
@@ -239,6 +240,7 @@ async def render_products_menu(event: Any, group_filter: str | None = None) -> N
 
 async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> None:
     u, lang = await get_user_info(event)
+    uid = u["telegram_id"]
     tier = u.get("tier", "bronze")
     p = await ps_client.get_product_by_id(product_id, refresh=False)
     if not p:
@@ -247,11 +249,30 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
         return
     asyncio.create_task(ps_client.get_product_by_id(product_id, refresh=True))
 
-    base_vnd, unit_retail_vnd, disc_pct = db.compute_tier_unit_price(product_id, float(p["price"]), tier)
-    total_retail_vnd = unit_retail_vnd * qty
-    cost_vnd = db.compute_wholesale_vnd(float(p["price"]))
     in_stock = bool(p.get("inStock"))
     stock_num = p.get("stock")
+    if isinstance(stock_num, int) and stock_num >= 1 and qty > stock_num:
+        qty = max(1, stock_num)
+
+    active_vch = USER_ACTIVE_VOUCHER.get(uid)
+    pricing = db.compute_order_pricing(
+        product_id=product_id,
+        wholesale_usd=float(p["price"]),
+        qty=qty,
+        tier=tier,
+        voucher_code=active_vch,
+        user_id=uid,
+    )
+    if active_vch and not pricing["voucher_valid"]:
+        USER_ACTIVE_VOUCHER.pop(uid, None)
+
+    base_vnd = pricing["base_unit_vnd"]
+    unit_retail_vnd = pricing["vip_unit_vnd"]
+    disc_pct = pricing["vip_disc_pct"]
+    total_vip_vnd = pricing["total_vip_vnd"]
+    total_final_vnd = pricing["total_final_vnd"]
+    cost_vnd = pricing["unit_cost_vnd"]
+
     stock_str = (
         t(lang, "stock_keys_unit", n=stock_num)
         if isinstance(stock_num, int)
@@ -259,9 +280,15 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
     )
     desc = localize_product_description(product_id, p.get("description") or "", lang)
 
-    price_line = f"{t(lang, 'price_label')}: **{unit_retail_vnd:,}đ**"
-    if qty > 1:
-        price_line += f" (x{qty} = **{total_retail_vnd:,}đ**)"
+    if pricing["voucher_valid"]:
+        price_line = f"{t(lang, 'price_label')}: ~~{unit_retail_vnd:,}đ~~"
+        if qty > 1:
+            price_line += f" (x{qty} = ~~{total_vip_vnd:,}đ~~)"
+    else:
+        price_line = f"{t(lang, 'price_label')}: **{unit_retail_vnd:,}đ**"
+        if qty > 1:
+            price_line += f" (x{qty} = **{total_vip_vnd:,}đ**)"
+
     if disc_pct > 0 and unit_retail_vnd < base_vnd:
         price_line += "\n" + t(
             lang,
@@ -270,6 +297,16 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
             disc_pct=disc_pct,
             base_price=base_vnd,
             unit_price=unit_retail_vnd,
+        )
+
+    if pricing["voucher_valid"]:
+        price_line += "\n" + t(
+            lang,
+            "voucher_applied_note",
+            code=pricing["voucher_code"],
+            disc=pricing["voucher_discount_vnd"],
+            old_price=total_vip_vnd,
+            final_price=total_final_vnd,
         )
 
     text = (
@@ -284,10 +321,6 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
 
     rows: list[list[Any]] = []
     if in_stock and (stock_num is None or stock_num >= 1):
-        if isinstance(stock_num, int) and qty > stock_num:
-            qty = max(1, stock_num)
-            total_retail_vnd = unit_retail_vnd * qty
-
         preset_qtys = [1, 2, 5, 10]
         if qty not in preset_qtys:
             preset_qtys.append(qty)
@@ -312,9 +345,31 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
         if len(qty_row) > 1:
             rows.append(qty_row)
 
+        # Nút Nhập mã giảm giá (Voucher) hoặc Đang áp mã [❌ Bỏ mã] nằm ngay trên nút Mua ngay
+        if pricing["voucher_valid"]:
+            rows.append([
+                Button.inline(
+                    t(
+                        lang,
+                        "voucher_applied_btn",
+                        code=pricing["voucher_code"],
+                        disc=pricing["voucher_discount_vnd"],
+                    ),
+                    f"vch:rm:{product_id}:{qty}".encode(),
+                    style="primary",
+                )
+            ])
+        else:
+            rows.append([
+                Button.inline(
+                    t(lang, "voucher_apply_btn"),
+                    f"vch:ask:{product_id}:{qty}".encode(),
+                )
+            ])
+
         rows.append([
             Button.inline(
-                t(lang, "buy_btn", price=total_retail_vnd),
+                t(lang, "buy_btn", price=total_final_vnd),
                 f"buy:{product_id}:{qty}".encode(),
                 style="success",
             )
@@ -322,7 +377,7 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
     else:
         rows.append([Button.inline(t(lang, "out_of_stock_btn"), b"noop", style="danger")])
 
-    if is_admin(u["telegram_id"]):
+    if is_admin(uid):
         rows.append([
             Button.inline(
                 f"⚙️ Vốn: {cost_vnd:,}đ | Sửa giá bán ({base_vnd:,}đ)",
@@ -335,7 +390,7 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
     await send_or_edit(event, text, buttons=rows)
 
 
-# ==================== BUY & AUTO-FULFILLMENT (VNĐ + CHỐNG RACE CONDITION) ====================
+# ==================== BUY & AUTO-FULFILLMENT (VNĐ + CHỐNG RACE CONDITION + VOUCHER) ====================
 async def execute_purchase(
     client: TelegramClient,
     event: Any,
@@ -377,11 +432,19 @@ async def execute_purchase(
         fresh_user = db.get_or_create_user(uid)
         tier = fresh_user.get("tier", "bronze")
         unit_cost_usd = float(p["price"])
-        _, unit_retail_vnd, _ = db.compute_tier_unit_price(product_id, unit_cost_usd, tier)
-        total_cost_vnd = db.compute_wholesale_vnd(unit_cost_usd * qty)
-        total_retail_vnd = unit_retail_vnd * qty
+        active_vch = USER_ACTIVE_VOUCHER.get(uid)
+        pricing = db.compute_order_pricing(
+            product_id=product_id,
+            wholesale_usd=unit_cost_usd,
+            qty=qty,
+            tier=tier,
+            voucher_code=active_vch,
+            user_id=uid,
+        )
+        total_cost_vnd = pricing["total_cost_vnd"]
+        total_retail_vnd = pricing["total_final_vnd"]
 
-        # Trừ số dư VNĐ nguyên tử (Atomic SQLite check + deduct)
+        # Trừ số dư VNĐ nguyên tử (Atomic check + deduct)
         deducted_ok, current_bal_vnd = db.deduct_balance_atomic(uid, total_retail_vnd)
         if not deducted_ok:
             rows = [
@@ -452,6 +515,17 @@ async def execute_purchase(
         )
         db.record_purchase_stats(uid, total_retail_vnd)
 
+        vch_admin_line = ""
+        if pricing["voucher_valid"] and pricing["voucher_code"]:
+            db.redeem_voucher_atomic(
+                pricing["voucher_code"],
+                uid,
+                local_order_id,
+                pricing["voucher_discount_vnd"],
+            )
+            USER_ACTIVE_VOUCHER.pop(uid, None)
+            vch_admin_line = f"🎟️ Voucher áp dụng: **{pricing['voucher_code']}** (-{pricing['voucher_discount_vnd']:,}đ)\n"
+
         if ps_status == "paid" and not keys:
             await status_msg.edit(
                 t(
@@ -506,7 +580,8 @@ async def execute_purchase(
                         f"🎉 **ĐƠN HÀNG MỚI #{local_order_id}**\n\n"
                         f"👤 Khách: `{uid}` (@{u['username']})\n"
                         f"🛍️ Sản phẩm: **{p['name']}** (x{qty})\n"
-                        f"💰 Giá bán: **{total_retail_vnd:,}đ**\n"
+                        f"{vch_admin_line}"
+                        f"💰 Giá thu khách: **{total_retail_vnd:,}đ**\n"
                         f"📉 Giá vốn ProdSeller: **{actual_cost_vnd:,}đ** (`${actual_cost_usd:.2f}`)\n"
                         f"💵 **Lợi nhuận ròng: +{profit_vnd:,}đ**"
                     ),
@@ -901,6 +976,7 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
         ],
         [
             Button.inline("🏷️ Chỉnh giá riêng / Ẩn-Hiện từng SP (VNĐ)", b"adm:plist:0", style="primary"),
+            Button.inline("🎟️ Quản lý Voucher", b"adm:vouchers", style="primary"),
         ],
         [
             Button.inline("📈 Chỉnh % Lợi nhuận", b"adm:set:markup_percent"),
@@ -919,6 +995,50 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
             Button.inline("« Về Menu Chính", b"menu:home"),
         ],
     ]
+    await send_or_edit(event, text, buttons=rows, force_new=force_new)
+
+
+async def render_admin_vouchers(event: Any, force_new: bool = False) -> None:
+    vouchers = db.get_all_vouchers()
+    rows: list[list[Any]] = [
+        [Button.inline("➕ Tạo Mã Giảm Giá Mới (5 giây)", b"adm:vch_add", style="success")],
+    ]
+    if not vouchers:
+        text = (
+            "🎟️ **QUẢN LÝ MÃ GIẢM GIÁ (VOUCHER)**\n\n"
+            "📭 Hiện chưa có mã giảm giá nào.\n"
+            "🛡️ *Chốt chặn an toàn: Mọi mã giảm giá đều tự động chặn sàn ở Giá vốn đại lý (`cost_vnd`), đảm bảo bạn không bao giờ bị lỗ vốn!*\n\n"
+            "👉 Bấm **➕ Tạo Mã Giảm Giá Mới** bên dưới để tạo nhanh trong 5 giây."
+        )
+    else:
+        lines = [
+            "🎟️ **DANH SÁCH MÃ GIẢM GIÁ (VOUCHER)**\n"
+            "🛡️ *Chốt chặn chống lỗ vốn (`>= Giá vốn ProdSeller`) đang BẬT tự động 100%.*\n"
+        ]
+        for code, v in vouchers.items():
+            is_act = int(v.get("active", 0) or 0) == 1
+            dtype = v.get("discount_type", "percent")
+            dval = float(v.get("discount_value", 0) or 0)
+            disc_str = f"-{dval:g}%" if dtype == "percent" else f"-{int(round(dval)):,}đ"
+            max_u = int(v.get("max_uses", 0) or 0)
+            used_u = int(v.get("used_count", 0) or 0)
+            usage_str = f"{used_u}/{max_u} lượt" if max_u > 0 else f"{used_u}/∞ lượt"
+            st_badge = "🟢 Đang BẬT" if is_act else "🔴 Đã TẮT"
+            lines.append(f"• `{code}` | Giảm: **{disc_str}** | Đã dùng: **{usage_str}** [{st_badge}]")
+            rows.append([
+                Button.inline(
+                    f"{'🔴 Tắt' if is_act else '🟢 Bật'} {code} ({usage_str})",
+                    f"adm:vch_tog:{code}".encode(),
+                    style="primary" if is_act else None,
+                ),
+                Button.inline(
+                    f"🗑️ Xóa {code}",
+                    f"adm:vch_del:{code}".encode(),
+                    style="danger",
+                ),
+            ])
+        text = "\n".join(lines)
+    rows.append([Button.inline("« Về Bảng Admin", b"adm:home")])
     await send_or_edit(event, text, buttons=rows, force_new=force_new)
 
 
@@ -1282,6 +1402,32 @@ async def run_bot() -> None:
             )
             return
 
+        if data.startswith("vch:ask:"):
+            await event.answer()
+            _, _, pid, q_str = data.split(":")
+            qty_val = int(q_str)
+            p = await ps_client.get_product_by_id(pid, refresh=False)
+            p_name = p["name"] if p else pid
+            USER_AWAITING[uid] = {
+                "type": "apply_voucher",
+                "product_id": pid,
+                "qty": qty_val,
+                "name": p_name,
+            }
+            await send_or_edit(
+                event,
+                t(lang, "voucher_prompt", name=p_name),
+                buttons=[[Button.inline(t(lang, "btn_back"), f"qty:{pid}:{qty_val}".encode())]],
+            )
+            return
+
+        if data.startswith("vch:rm:"):
+            _, _, pid, q_str = data.split(":")
+            USER_ACTIVE_VOUCHER.pop(uid, None)
+            await event.answer(t(lang, "voucher_removed_toast"))
+            await render_product_detail(event, pid, qty=int(q_str))
+            return
+
         if data.startswith("buy:"):
             await event.answer()
             _, pid, q_str = data.split(":")
@@ -1567,6 +1713,46 @@ async def run_bot() -> None:
             if data == "adm:home":
                 await event.answer()
                 await render_admin_home(event)
+                return
+
+            if data == "adm:vouchers":
+                await event.answer()
+                await render_admin_vouchers(event)
+                return
+
+            if data == "adm:vch_add":
+                await event.answer()
+                USER_AWAITING[uid] = {"type": "admin_vch_add"}
+                await send_or_edit(
+                    event,
+                    (
+                        "🎟️ **TẠO MÃ GIẢM GIÁ MỚI (5 GIÂY)**\n\n"
+                        "Nhập theo cú pháp:\n"
+                        "`MÃ_CODE | MỨC_GIẢM | SỐ_LƯỢT_TỐI_ĐA`\n\n"
+                        "📌 **Ví dụ 1 (Giảm theo %):**\n"
+                        "`SALE20 | 20% | 50` *(Giảm 20%, tối đa 50 lượt)*\n\n"
+                        "📌 **Ví dụ 2 (Giảm số tiền VNĐ cố định):**\n"
+                        "`GIAM15K | 15k | 20` *(Giảm 15,000đ, tối đa 20 lượt)*\n\n"
+                        "📌 **Ví dụ 3 (Không giới hạn tổng lượt, mỗi khách 1 lần):**\n"
+                        "`WELCOME10 | 10% | 0`\n\n"
+                        "🛡️ *Chốt chặn chống lỗ vốn (`>= Giá vốn ProdSeller`) luôn tự động áp dụng!*"
+                    ),
+                    buttons=[[Button.inline("« Hủy", b"adm:vouchers")]],
+                )
+                return
+
+            if data.startswith("adm:vch_tog:"):
+                v_code = data.split(":", 2)[2]
+                is_act = db.toggle_voucher_active(v_code)
+                await event.answer(f"🟢 Đã BẬT mã {v_code}!" if is_act else f"🔴 Đã TẮT mã {v_code}!")
+                await render_admin_vouchers(event)
+                return
+
+            if data.startswith("adm:vch_del:"):
+                v_code = data.split(":", 2)[2]
+                db.delete_voucher(v_code)
+                await event.answer(f"🗑️ Đã xóa mã {v_code}!")
+                await render_admin_vouchers(event)
                 return
 
             if data == "adm:deplist":
@@ -1868,6 +2054,28 @@ async def run_bot() -> None:
             await render_product_detail(event, pid, qty=q_val)
             return
 
+        if atype == "apply_voucher":
+            pid = awaiting["product_id"]
+            qty_val = int(awaiting.get("qty", 1))
+            v_code = text.strip().upper()
+            ok, reason, _ = db.validate_voucher_for_user(v_code, uid)
+            if not ok:
+                err_key = {
+                    "not_found": "voucher_err_not_found",
+                    "inactive": "voucher_err_inactive",
+                    "exhausted": "voucher_err_exhausted",
+                    "already_used": "voucher_err_already_used",
+                }.get(reason, "voucher_err_not_found")
+                await event.respond(
+                    t(lang, err_key, code=v_code),
+                    buttons=[[Button.inline(t(lang, "btn_back"), f"qty:{pid}:{qty_val}".encode())]],
+                )
+                return
+            USER_AWAITING.pop(uid, None)
+            USER_ACTIVE_VOUCHER[uid] = v_code
+            await render_product_detail(event, pid, qty=qty_val)
+            return
+
         if atype == "custom_deposit":
             try:
                 amt_vnd = parse_vnd_input(text)
@@ -1881,6 +2089,48 @@ async def run_bot() -> None:
             return
 
         if not is_admin(uid):
+            return
+
+        if atype == "admin_vch_add":
+            raw_parts = [p.strip() for p in (text.split("|") if "|" in text else text.split())]
+            if len(raw_parts) < 2:
+                await event.respond(
+                    "❌ Sai cú pháp! Hãy nhập: `MÃ_CODE | MỨC_GIẢM | SỐ_LƯỢT_TỐI_ĐA`\n"
+                    "Ví dụ: `SALE20 | 20% | 50` hoặc `GIAM15K | 15k | 20`",
+                    buttons=[[Button.inline("« Hủy", b"adm:vouchers")]],
+                )
+                return
+            v_code = "".join(ch for ch in raw_parts[0].upper() if ch.isalnum() or ch in ("_", "-"))
+            disc_raw = raw_parts[1].strip()
+            max_u_str = raw_parts[2].strip() if len(raw_parts) >= 3 else "0"
+            try:
+                if not v_code:
+                    raise ValueError
+                if disc_raw.endswith("%"):
+                    dtype = "percent"
+                    dval = float(disc_raw[:-1].replace(",", ".").strip())
+                    if dval <= 0 or dval >= 100:
+                        raise ValueError
+                else:
+                    dtype = "fixed"
+                    dval = float(parse_vnd_input(disc_raw))
+                    if dval <= 0:
+                        raise ValueError
+                max_uses = max(0, int(float(max_u_str)))
+            except ValueError:
+                await event.respond(
+                    "❌ Dữ liệu không hợp lệ! Vui lòng kiểm tra lại mức giảm (`15%` hoặc `15k`) và số lượt (`0` = không giới hạn):",
+                    buttons=[[Button.inline("« Hủy", b"adm:vouchers")]],
+                )
+                return
+            USER_AWAITING.pop(uid, None)
+            db.create_or_update_voucher(v_code, dtype, dval, max_uses)
+            disc_label = f"-{dval:g}%" if dtype == "percent" else f"-{int(round(dval)):,}đ"
+            limit_label = f"{max_uses} lượt" if max_uses > 0 else "Không giới hạn tổng lượt"
+            await event.respond(
+                f"✅ Đã tạo mã giảm giá **`{v_code}`** (Giảm **{disc_label}** | Tối đa: **{limit_label}** | Mỗi khách 1 lần)!"
+            )
+            await render_admin_vouchers(event, force_new=True)
             return
 
         if atype == "admin_finduser":
