@@ -181,6 +181,34 @@ STRINGS: dict[str, dict[str, str]] = {
             "📧 Email kích hoạt: `{email}`\n"
             "⏳ Trạng thái: **Đang kích hoạt (ASAP)** — Hệ thống sẽ tự động nhắn tin cho bạn ngay khi kích hoạt hoàn tất!"
         ),
+        "btn_newbie_gift": "🎁 Nhận Quà Tân Thủ (Miễn Phí)",
+        "newbie_gift_title": (
+            "🎁 **QUÀ TẶNG TÂN THỦ KINGTOOL SHOP**\n\n"
+            "Chào mừng bạn mới! Chỉ cần tham gia kênh thông báo chính thức **@{channel}** để nhận ngay bộ quà tặng:\n"
+            "• ⭐ **+{pts} Điểm thưởng tích lũy** *(Đủ 10 điểm đổi thẳng ra tiền mặt VNĐ trong ví!)*\n"
+            "• 🎟️ **Mã giảm giá `{code}`** *(Tự động kích hoạt giảm giá ngay cho đơn hàng đầu tiên của bạn!)*\n\n"
+            "👇 **Thực hiện trong 5 giây:**\n"
+            "1️⃣ Bấm nút **📣 Bước 1: Tham gia Kênh @{channel}** bên dưới.\n"
+            "2️⃣ Quay lại đây bấm **✅ Bước 2: Đã tham gia — Nhận Quà Ngay!**"
+        ),
+        "newbie_gift_join_btn": "📣 Bước 1: Tham gia Kênh @{channel}",
+        "newbie_gift_claim_btn": "✅ Bước 2: Đã tham gia — Nhận Quà Ngay!",
+        "newbie_gift_not_joined": "⚠️ Hệ thống kiểm tra thấy bạn chưa tham gia kênh @{channel}! Hãy bấm nút Bước 1 để Join kênh trước rồi bấm Nhận quà nhé.",
+        "newbie_gift_already_claimed": "✅ Bạn đã nhận gói Quà Tân Thủ này trước đó rồi!",
+        "newbie_gift_success": (
+            "🎉 **CHÚC MỪNG! BẠN ĐÃ NHẬN QUÀ TÂN THỦ THÀNH CÔNG!**\n\n"
+            "⭐ Điểm thưởng cộng thêm: **+{pts_added} điểm** *(Hiện có: **{total_pts} điểm** — Đủ 10 điểm đổi thẳng sang tiền VNĐ)*\n"
+            "🎟️ Mã giảm giá **`{code}`** đã được **tự động gắn sẵn vào giỏ hàng của bạn**!\n\n"
+            "👉 Hãy bấm **🛍️ Mở Kho Sản Phẩm (Đã áp sẵn mã giảm giá)** bên dưới để xem mức giá ưu đãi dành riêng cho bạn!"
+        ),
+        "newbie_gift_shop_btn": "🛍️ Mở Kho Sản Phẩm (Đã áp sẵn mã {code})",
+        "deposit_reminder_msg": (
+            "💡 **Nhắc nhở đơn nạp tiền `#{dep_id}` ({amount_vnd:,}đ)**\n\n"
+            "Hệ thống nhận thấy bạn vừa tạo mã QR nạp **{amount_vnd:,}đ** (Nội dung CK: `{memo}`) nhưng giao dịch chưa hoàn tất.\n\n"
+            "✅ Nếu bạn **đã chuyển khoản**, hãy bấm nút **✅ Tôi đã chuyển khoản** bên dưới để hệ thống duyệt cộng tiền ngay.\n"
+            "🎁 **Ưu đãi đang bật:** Nạp từ **200,000đ** tặng thêm **+5%**, từ **500,000đ** tặng thêm **+10%** tự động vào ví!\n"
+            "🆘 Nếu bạn cần hỗ trợ quét mã QR, hãy nhắn ngay cho CSKH nhé."
+        ),
     },
     "en": {
         "welcome_banner": "👋 Welcome to our Automated Shop Bot!\n\n📣 Channel: @{channel}\n🆘 Support: @{admin}",
@@ -352,6 +380,34 @@ STRINGS: dict[str, dict[str, str]] = {
             "🛍️ Product: **{name}**\n"
             "📧 Email: `{email}`\n"
             "⏳ Status: **Paid (Activating ASAP)** — You will be notified automatically once completed!"
+        ),
+        "btn_newbie_gift": "🎁 Free Newbie Gift",
+        "newbie_gift_title": (
+            "🎁 **KINGTOOL SHOP NEWBIE GIFT**\n\n"
+            "Welcome! Join our official announcement channel **@{channel}** to claim your free starter pack:\n"
+            "• ⭐ **+{pts} Reward Points** *(Redeemable for VNĐ wallet balance at 10 pts!)*\n"
+            "• 🎟️ **Voucher `{code}`** *(Auto-applied discount for your first order!)*\n\n"
+            "👇 **Complete in 5 seconds:**\n"
+            "1️⃣ Tap **📣 Step 1: Join @{channel}** below.\n"
+            "2️⃣ Tap **✅ Step 2: Joined — Claim Gift Now!**"
+        ),
+        "newbie_gift_join_btn": "📣 Step 1: Join Channel @{channel}",
+        "newbie_gift_claim_btn": "✅ Step 2: Joined — Claim Gift Now!",
+        "newbie_gift_not_joined": "⚠️ You haven't joined @{channel} yet! Please tap Step 1 to join the channel first.",
+        "newbie_gift_already_claimed": "✅ You have already claimed your Newbie Gift!",
+        "newbie_gift_success": (
+            "🎉 **CONGRATULATIONS! NEWBIE GIFT CLAIMED!**\n\n"
+            "⭐ Reward Points added: **+{pts_added} pts** *(Total: **{total_pts} pts**)*\n"
+            "🎟️ Voucher **`{code}`** has been **automatically applied to your cart**!\n\n"
+            "👉 Tap **🛍️ Browse Products (Voucher {code} Applied)** below to shop with your instant discount!"
+        ),
+        "newbie_gift_shop_btn": "🛍️ Browse Products (Voucher {code} Applied)",
+        "deposit_reminder_msg": (
+            "💡 **Reminder for Pending Deposit `#{dep_id}` ({amount_vnd:,}đ)**\n\n"
+            "We noticed you generated a QR code for **{amount_vnd:,}đ** (Memo: `{memo}`) that hasn't been completed yet.\n\n"
+            "✅ If you **have already transferred**, please tap **✅ I have transferred** below so Admin can credit your balance right away.\n"
+            "🎁 **Active Promo:** Deposit from **200,000đ** for **+5% bonus**, or **500,000đ** for **+10% bonus**!\n"
+            "🆘 Need help? Contact our support team anytime."
         ),
     },
 }

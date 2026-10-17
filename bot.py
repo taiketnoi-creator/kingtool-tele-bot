@@ -19,13 +19,14 @@ import random
 import time
 import urllib.parse
 import uuid
+from datetime import datetime
 from pathlib import Path
 from typing import Any
 
 from dotenv import load_dotenv
 from telethon import Button, TelegramClient, events
 
-from database import TIER_DISCOUNTS, Database
+from database import TIER_DISCOUNTS, VN_TZ, Database
 from i18n import LANGUAGES, localize_product_description, t
 from prodseller_client import (
     GROUP_EMOJI,
@@ -110,24 +111,34 @@ def format_order_keys_preview(raw_keys: str) -> str:
 
 
 def main_menu_buttons(lang: str, user_id: int) -> list[list[Any]]:
-    rows = [
+    rows: list[list[Any]] = [
         [
             Button.inline(t(lang, "btn_products"), b"menu:products", style="success"),
             Button.inline(t(lang, "btn_balance"), b"menu:balance"),
         ],
-        [
-            Button.inline(t(lang, "btn_deposit"), b"menu:deposit"),
-            Button.inline(t(lang, "btn_methods"), b"menu:methods"),
-        ],
-        [
-            Button.inline(t(lang, "btn_profile"), b"menu:profile"),
-            Button.inline(f"🔌 {t(lang, 'btn_api')}", b"menu:api", style="primary", icon=6206497372176913599),
-        ],
-        [
-            Button.inline(t(lang, "btn_language"), b"menu:language"),
-            Button.inline(t(lang, "btn_support"), b"menu:support", style="danger"),
-        ],
     ]
+    gift_on = str(db.get_setting("newbie_gift_enabled", "1") or "0").strip() == "1"
+    if gift_on:
+        cached = db._users_cache.get(user_id)
+        claimed = int(cached[1].get("gift_claimed", 0) or 0) == 1 if cached else False
+        if not claimed:
+            rows.append([Button.inline(t(lang, "btn_newbie_gift"), b"menu:gift", style="success")])
+    rows.extend(
+        [
+            [
+                Button.inline(t(lang, "btn_deposit"), b"menu:deposit"),
+                Button.inline(t(lang, "btn_methods"), b"menu:methods"),
+            ],
+            [
+                Button.inline(t(lang, "btn_profile"), b"menu:profile"),
+                Button.inline(f"🔌 {t(lang, 'btn_api')}", b"menu:api", style="primary", icon=6206497372176913599),
+            ],
+            [
+                Button.inline(t(lang, "btn_language"), b"menu:language"),
+                Button.inline(t(lang, "btn_support"), b"menu:support", style="danger"),
+            ],
+        ]
+    )
     if is_admin(user_id):
         rows.append([Button.inline("⚙️ Quản trị Admin (Giá & Duyệt Nạp)", b"adm:home", style="primary")])
     return rows
@@ -595,6 +606,7 @@ async def execute_purchase(
                 client,
                 order_id=local_order_id,
                 uid=uid,
+                product_id=product_id,
                 product_name=p["name"],
                 qty=qty,
                 total_vnd=total_retail_vnd,
@@ -603,9 +615,14 @@ async def execute_purchase(
         asyncio.create_task(check_and_alert_low_prodseller_balance(client))
 
 
-# ==================== CẢNH BÁO VỐN & TỰ ĐỘNG ĐĂNG KÊNH @KingToolShopOfficial ====================
+# ==================== CẢNH BÁO VỐN, PHỄU KHÁCH HÀNG & TỰ ĐỘNG ĐĂNG KÊNH @KingToolShopOfficial ====================
 _LAST_LOW_BAL_ALERT_TS: float = 0.0
 _LAST_KNOWN_STOCK: dict[str, int] = {}
+_LAST_AUTO_POST_HOUR_KEY: str = ""
+_LAST_SIM_SOCIAL_TS: float = 0.0
+_LAST_SIM_SOCIAL_MSG_ID: int = 0
+_LAST_SPOTLIGHT_MSG_ID: int = 0
+_REMINDED_DEPOSIT_IDS: set[int] = set()
 
 
 async def check_and_alert_low_prodseller_balance(client: TelegramClient) -> None:
@@ -671,6 +688,12 @@ async def post_restock_notification(client: TelegramClient, restocked_items: lis
                     f"https://t.me/{BOT_USERNAME_CACHE}?start=BUY_{pid}",
                 )
             ])
+        rows.append([
+            Button.url(
+                "🎁 Nhận Quà Tân Thủ & Mã Giảm Giá (-10%)",
+                f"https://t.me/{BOT_USERNAME_CACHE}?start=GIFT",
+            )
+        ])
         lines.append("━━━━━━━━━━━━━━━━━━━━")
         lines.append("⚡ *Giao dịch tự động 100% — Nhận tài khoản/key ngay sau 2 giây!*")
         await client.send_message(ch_name, "\n".join(lines), buttons=rows)
@@ -680,39 +703,204 @@ async def post_restock_notification(client: TelegramClient, restocked_items: lis
 
 async def post_order_social_proof(
     client: TelegramClient,
-    order_id: int,
-    uid: int,
+    order_id: int | str,
+    uid: int | str,
     product_name: str,
     qty: int,
     total_vnd: int,
-) -> None:
+    product_id: str = "",
+) -> int | None:
     """Tự động đăng thông báo khách mua hàng thành công (ẩn danh ID) lên kênh @KingToolShopOfficial."""
     try:
         ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
         if not ch_name:
-            return
+            return None
         uid_s = str(uid)
-        masked_uid = f"{uid_s[:4]}***{uid_s[-2:]}" if len(uid_s) > 5 else f"{uid_s[:2]}***"
+        if "***" in uid_s:
+            masked_uid = uid_s
+        else:
+            masked_uid = f"{uid_s[:4]}***{uid_s[-2:]}" if len(uid_s) > 5 else f"{uid_s[:2]}***"
         support_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
         text = (
             f"⚡ **ĐƠN HÀNG TỰ ĐỘNG #{order_id} HOÀN TẤT**\n\n"
             f"👤 Khách hàng: `{masked_uid}`\n"
             f"🛍️ Sản phẩm: **{product_name.strip()}** (x{qty})\n"
             f"💵 Thanh toán: **{total_vnd:,}đ**\n"
-            f"✅ Trạng thái: **Đã trả tài khoản tự động trong 2 giây!**"
+            f"✅ Trạng thái: **Đã trả tài khoản tự động trong 2 giây!**\n"
+            f"🎁 *Khách mới bấm nút bên dưới để nhận ngay Mã giảm giá `-10%` & Điểm thưởng!*"
+        )
+        buy_url = (
+            f"https://t.me/{BOT_USERNAME_CACHE}?start=BUY_{product_id}"
+            if product_id
+            else f"https://t.me/{BOT_USERNAME_CACHE}"
         )
         rows = [
             [
-                Button.url("🛒 Mua Hàng Tự Động 24/7", f"https://t.me/{BOT_USERNAME_CACHE}"),
-                Button.url("🆘 Hỗ Trợ CSKH", f"https://t.me/{support_name}"),
-            ]
+                Button.url("🛒 Mua Sản Phẩm Này Ngay", buy_url),
+                Button.url("🎁 Quà Tân Thủ (-10%)", f"https://t.me/{BOT_USERNAME_CACHE}?start=GIFT"),
+            ],
+            [
+                Button.url("🆘 Hỗ Trợ & Bảo Hành 24/7", f"https://t.me/{support_name}"),
+            ],
         ]
-        await client.send_message(ch_name, text, buttons=rows)
+        msg = await client.send_message(ch_name, text, buttons=rows)
+        return msg.id if msg else None
     except Exception as exc:
         logger.debug("Không thể đăng social proof lên kênh: %s", exc)
+        return None
 
 
-async def post_catalog_to_channel(client: TelegramClient, pin: bool = True) -> int | None:
+async def post_simulated_social_proof(client: TelegramClient) -> int | None:
+    """Tự động đăng thông báo đơn hàng hoàn tất (Social Proof) định kỳ giúp kênh luôn sôi động, uy tín."""
+    global _LAST_SIM_SOCIAL_MSG_ID
+    try:
+        if str(db.get_setting("auto_social_proof_enabled", "1") or "0").strip() != "1":
+            return None
+        ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+        if not ch_name:
+            return None
+        products = await ps_client.sync_products(force=False)
+        overrides = db.get_all_overrides()
+        in_stock_prods = [
+            p
+            for p in products
+            if not overrides.get(p["id"], {}).get("hidden")
+            and bool(p.get("inStock"))
+            and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
+        ]
+        if not in_stock_prods:
+            return None
+
+        chosen = random.choice(in_stock_prods)
+        pid = str(chosen["id"])
+        qty = 1
+        unit_vnd = db.compute_retail_price(pid, float(chosen["price"]), overrides)
+        prefixes = ["5182", "6094", "7128", "8041", "6839", "5910", "7482", "1984", "6527", "8135"]
+        masked_uid = f"{random.choice(prefixes)}***{random.randint(10, 99)}"
+        stats = db.get_summary_stats()
+        sim_oid = max(108, int(stats.get("orders_count", 0)) + random.randint(120, 380))
+
+        # Xóa thông báo đơn mồi trước đó để kênh luôn gọn gàng, không bị loãng
+        if _LAST_SIM_SOCIAL_MSG_ID > 0:
+            try:
+                await client.delete_messages(ch_name, [_LAST_SIM_SOCIAL_MSG_ID])
+            except Exception:
+                pass
+
+        new_mid = await post_order_social_proof(
+            client,
+            order_id=sim_oid,
+            uid=masked_uid,
+            product_name=chosen["name"],
+            qty=qty,
+            total_vnd=unit_vnd * qty,
+            product_id=pid,
+        )
+        if new_mid:
+            _LAST_SIM_SOCIAL_MSG_ID = new_mid
+        return new_mid
+    except Exception as exc:
+        logger.debug("Không thể đăng simulated social proof: %s", exc)
+        return None
+
+
+async def post_spotlight_to_channel(client: TelegramClient) -> int | None:
+    """Tự động chọn 1-2 Sản phẩm Hot đang sẵn hàng để đăng bài giới thiệu kèm nút Mua 1 chạm & Quà Tân Thủ."""
+    global _LAST_SPOTLIGHT_MSG_ID
+    try:
+        ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+        support_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
+        if not ch_name:
+            return None
+        products = await ps_client.sync_products(force=False)
+        overrides = db.get_all_overrides()
+        in_stock_prods = [
+            p
+            for p in products
+            if not overrides.get(p["id"], {}).get("hidden")
+            and bool(p.get("inStock"))
+            and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
+        ]
+        if not in_stock_prods:
+            return None
+
+        chosen = random.choice(in_stock_prods)
+        pid = str(chosen["id"])
+        gift_code = db.get_setting("newbie_gift_voucher", "TANTHU10").strip().upper() or "TANTHU10"
+        pricing = db.compute_order_pricing(
+            product_id=pid,
+            wholesale_usd=float(chosen["price"]),
+            qty=1,
+            tier="bronze",
+            voucher_code=gift_code,
+            overrides=overrides,
+        )
+        base_vnd = pricing["base_unit_vnd"]
+        final_vnd = pricing["total_final_vnd"]
+        st = chosen.get("stock")
+        st_txt = f"Còn {st} suất" if isinstance(st, int) else "Sẵn hàng"
+
+        raw_desc = localize_product_description(pid, chosen.get("description") or "", "vi")
+        desc_lines = [ln.strip() for ln in raw_desc.splitlines() if ln.strip() and not ln.strip().startswith("━")]
+        short_desc = "\n".join(desc_lines[:6])
+        if len(short_desc) > 420:
+            short_desc = short_desc[:417] + "..."
+
+        price_block = (
+            f"💵 Giá niêm yết: ~~`{base_vnd:,}đ`~~ ➡️ **Chỉ còn `{final_vnd:,}đ`** *(Khi áp mã `{gift_code}`)*"
+            if final_vnd < base_vnd
+            else f"💵 Giá ưu đãi: **`{base_vnd:,}đ`**"
+        )
+
+        text = (
+            "🔥 **TIÊU ĐIỂM SẢN PHẨM HOT TRONG NGÀY — GIAO NGAY 2 GIÂY** 🔥\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            f"🛍️ **{chosen['name'].strip()}**\n"
+            f"📦 Tình trạng kho: **{st_txt}**\n"
+            f"{price_block}\n\n"
+            f"{short_desc}\n"
+            "━━━━━━━━━━━━━━━━━━━━\n"
+            "🎁 **ƯU ĐÃI ĐẶC BIỆT HÔM NAY:**\n"
+            f"• Nhập mã **`{gift_code}`** hoặc bấm **Nhận Quà Tân Thủ** để được **giảm ngay 10% + tặng Điểm thưởng**!\n"
+            "• Nạp từ **200,000đ** tặng thêm **+5%**, từ **500,000đ** tặng thêm **+10%** vào ví!\n"
+            "• Bảo hành 1 chạm trực tiếp trên Bot — Hỗ trợ 24/7 tại @" + support_name
+        )
+        short_name = chosen["name"].strip()[:24]
+        rows = [
+            [
+                Button.url(
+                    f"🛒 Mua ngay: {short_name} ({final_vnd:,}đ)",
+                    f"https://t.me/{BOT_USERNAME_CACHE}?start=BUY_{pid}",
+                )
+            ],
+            [
+                Button.url(
+                    f"🎁 Nhận Quà Tân Thủ & Mã {gift_code}",
+                    f"https://t.me/{BOT_USERNAME_CACHE}?start=GIFT",
+                )
+            ],
+            [
+                Button.url("🛍️ Xem Toàn Bộ Kho Hàng", f"https://t.me/{BOT_USERNAME_CACHE}"),
+                Button.url("🆘 Hỗ Trợ CSKH", f"https://t.me/{support_name}"),
+            ],
+        ]
+
+        if _LAST_SPOTLIGHT_MSG_ID > 0:
+            try:
+                await client.delete_messages(ch_name, [_LAST_SPOTLIGHT_MSG_ID])
+            except Exception:
+                pass
+
+        msg = await client.send_message(ch_name, text, buttons=rows)
+        if msg:
+            _LAST_SPOTLIGHT_MSG_ID = msg.id
+        return msg.id if msg else None
+    except Exception as exc:
+        logger.debug("Không thể đăng bài Spotlight lên kênh: %s", exc)
+        return None
+
+
+async def post_catalog_to_channel(client: TelegramClient, pin: bool = True, delete_old: bool = True) -> int | None:
     """Tổng hợp bảng giá VNĐ + tồn kho toàn bộ sản phẩm đang bán và đăng lên @KingToolShopOfficial."""
     ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
     support_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
@@ -733,14 +921,17 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True) -> i
         st_txt = f"Còn {st}" if isinstance(st, int) else "Sẵn hàng"
         in_stock_lines.append(f"🟢 **{p['name'].strip()}** — `{price_vnd:,}đ` *({st_txt})*")
 
+    now_vn_str = datetime.now(VN_TZ).strftime("%H:%M %d/%m/%Y")
+    gift_code = db.get_setting("newbie_gift_voucher", "TANTHU10").strip().upper() or "TANTHU10"
     catalog_block = "\n".join(in_stock_lines[:25]) if in_stock_lines else "Đang cập nhật kho hàng..."
     text = (
         "👑 **KINGTOOL SHOP — HỆ THỐNG PHÂN PHỐI TÀI KHOẢN & KEY AI TỰ ĐỘNG 24/7** 👑\n"
+        f"🕒 *Cập nhật kho tự động lúc: `{now_vn_str}`*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "✅ **Giao dịch tự động 100% qua Bot** — Nhận tài khoản/key ngay sau 2 giây!\n"
-        "✅ **Thanh toán VietQR nội địa** — Quét QR tự động điền số tiền & nội dung.\n"
-        "✅ **Bảo hành uy tín 1 đổi 1** — Đội ngũ CSKH hỗ trợ 24/7.\n"
-        "✅ **Đặc quyền thành viên:** Giảm **3% (Hạng Silver)**, **5% (Hạng Gold)**, tích điểm đổi tiền & nhận **+5% Hoa hồng giới thiệu bạn bè**!\n\n"
+        "✅ **Thanh toán VietQR nội địa** — Quét QR tự động điền số tiền & nội dung (+Thưởng nạp tới **10%**).\n"
+        "✅ **Bảo hành uy tín 1 chạm** — Đội ngũ CSKH hỗ trợ 24/7.\n"
+        f"🎁 **Ưu đãi Tân Thủ:** Tham gia kênh nhận ngay **Điểm thưởng + Mã `{gift_code}` (-10%)**!\n\n"
         "🔥 **BẢNG GIÁ SẢN PHẨM ĐANG SẴN HÀNG:**\n"
         f"{catalog_block}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
@@ -749,15 +940,137 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True) -> i
     )
     rows = [
         [Button.url("🛒 MỞ BOT MUA HÀNG TỰ ĐỘNG NGAY", f"https://t.me/{BOT_USERNAME_CACHE}")],
+        [Button.url(f"🎁 NHẬN QUÀ TÂN THỦ & MÃ GIẢM GIÁ ({gift_code})", f"https://t.me/{BOT_USERNAME_CACHE}?start=GIFT")],
         [Button.url("🆘 Trung Tâm Hỗ Trợ & Bảo Hành (CSKH)", f"https://t.me/{support_name}")],
     ]
+
+    if delete_old:
+        old_mid = int(float(db.get_setting("last_catalog_msg_id", "0") or 0))
+        if old_mid > 0:
+            try:
+                await client.delete_messages(ch_name, [old_mid])
+            except Exception:
+                pass
+
     msg = await client.send_message(ch_name, text, buttons=rows)
-    if pin and msg:
+    if msg:
+        db.set_setting("last_catalog_msg_id", str(msg.id))
+        if pin:
+            try:
+                await client.pin_message(ch_name, msg.id, notify=False)
+            except Exception:
+                pass
+        return msg.id
+    return None
+
+
+async def check_and_remind_abandoned_deposits(client: TelegramClient) -> None:
+    """Nhắc nhở nhẹ nhàng cho khách tạo mã QR nạp tiền sau 10-45 phút mà chưa hoàn tất chuyển khoản."""
+    try:
+        if str(db.get_setting("deposit_reminder_enabled", "1") or "0").strip() != "1":
+            return
+        pending_list = db.get_unreminded_pending_deposits(min_age_minutes=10, max_age_minutes=45)
+        if not pending_list:
+            return
+        support_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
+        for dep in pending_list:
+            dep_id = int(dep["id"])
+            if dep_id in _REMINDED_DEPOSIT_IDS:
+                continue
+            _REMINDED_DEPOSIT_IDS.add(dep_id)
+            uid = int(dep["user_id"])
+            amt_vnd = vnd_int(dep["amount_vnd"])
+            memo = dep.get("memo") or f"NAP{dep_id}"
+            u = db.get_or_create_user(uid)
+            u_lang = u.get("language", "vi")
+            rows = [
+                [Button.inline(t(u_lang, "vietqr_paid_btn"), f"dep:Paid:{dep_id}".encode(), style="success")],
+                [Button.inline(t(u_lang, "deposit_now_btn"), b"menu:deposit", style="primary")],
+                [Button.url(f"🆘 @{support_name}", f"https://t.me/{support_name}")],
+            ]
+            try:
+                await client.send_message(
+                    uid,
+                    t(u_lang, "deposit_reminder_msg", dep_id=dep_id, amount_vnd=amt_vnd, memo=memo),
+                    buttons=rows,
+                )
+            except Exception:
+                pass
+    except Exception as exc:
+        logger.debug("Lỗi kiểm tra nhắc đơn nạp bỏ dở: %s", exc)
+
+
+async def render_newbie_gift_funnel(event: Any, force_new: bool = False) -> None:
+    """Hiển thị màn hình Phễu Quà Tân Thủ yêu cầu tham gia Kênh @KingToolShopOfficial."""
+    u, lang = await get_user_info(event)
+    channel_user = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+    gift_pts = max(1, int(float(db.get_setting("newbie_gift_points", "5") or 5)))
+    gift_code = db.get_setting("newbie_gift_voucher", "TANTHU10").strip().upper() or "TANTHU10"
+
+    rows = [
+        [Button.url(t(lang, "newbie_gift_join_btn", channel=channel_user), f"https://t.me/{channel_user}")],
+        [Button.inline(t(lang, "newbie_gift_claim_btn"), b"gift:claim", style="success")],
+        [Button.inline(t(lang, "btn_back"), b"menu:home")],
+    ]
+    await send_or_edit(
+        event,
+        t(lang, "newbie_gift_title", channel=channel_user, pts=gift_pts, code=gift_code),
+        buttons=rows,
+        force_new=force_new,
+    )
+
+
+async def handle_claim_newbie_gift(client: TelegramClient, event: Any) -> None:
+    """Kiểm tra khách đã tham gia Kênh @KingToolShopOfficial chưa và trao Quà Tân Thủ (Điểm + Auto-Voucher)."""
+    u, lang = await get_user_info(event)
+    uid = u["telegram_id"]
+    if int(u.get("gift_claimed", 0) or 0) == 1:
+        await event.answer(t(lang, "newbie_gift_already_claimed"), alert=True)
+        return
+
+    channel_user = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+    joined_ok = False
+    if channel_user:
         try:
-            await client.pin_message(ch_name, msg.id, notify=False)
-        except Exception:
-            pass
-    return msg.id if msg else None
+            perms = await client.get_permissions(channel_user, uid)
+            if perms and not getattr(perms, "is_banned", False):
+                joined_ok = True
+        except Exception as exc:
+            err_name = type(exc).__name__
+            if "UserNotParticipant" in err_name or "USER_NOT_PARTICIPANT" in str(exc):
+                joined_ok = False
+            else:
+                joined_ok = True
+    else:
+        joined_ok = True
+
+    if not joined_ok:
+        await event.answer(t(lang, "newbie_gift_not_joined", channel=channel_user), alert=True)
+        return
+
+    gift_pts = max(1, int(float(db.get_setting("newbie_gift_points", "5") or 5)))
+    gift_code = db.get_setting("newbie_gift_voucher", "TANTHU10").strip().upper() or "TANTHU10"
+    if not db.get_voucher(gift_code):
+        db.create_or_update_voucher(gift_code, "percent", 10.0, max_uses=0)
+
+    claimed, total_pts = db.claim_newbie_gift(uid, bonus_points=gift_pts)
+    if not claimed:
+        await event.answer(t(lang, "newbie_gift_already_claimed"), alert=True)
+        return
+
+    # Tự động gắn sẵn mã giảm giá Tân thủ vào giỏ hàng để khách bấm vào SP nào cũng thấy giá đã giảm ngay!
+    USER_ACTIVE_VOUCHER[uid] = gift_code
+    await event.answer("🎉", alert=False)
+    rows = [
+        [Button.inline(t(lang, "newbie_gift_shop_btn", code=gift_code), b"menu:products", style="success")],
+        [Button.inline(t(lang, "btn_back"), b"menu:home")],
+    ]
+    await send_or_edit(
+        event,
+        t(lang, "newbie_gift_success", pts_added=gift_pts, total_pts=total_pts, code=gift_code),
+        buttons=rows,
+    )
+
 
 
 # ==================== DEPOSIT & HOA HỒNG GIỚI THIỆU (VIETQR VNĐ) ====================
@@ -1001,8 +1314,8 @@ async def poll_night_sepay_deposits_loop(client: TelegramClient) -> None:
 
 
 async def poll_products_sync_loop(client: TelegramClient) -> None:
-    """Đồng bộ danh mục sản phẩm và tồn kho ngầm mỗi 60 giây, phát hiện Restock và kiểm tra vốn."""
-    global _LAST_KNOWN_STOCK
+    """Đồng bộ danh mục sản phẩm và tồn kho ngầm mỗi 60 giây, phát hiện Restock, kiểm tra vốn & chạy Phễu Tự Động."""
+    global _LAST_KNOWN_STOCK, _LAST_AUTO_POST_HOUR_KEY, _LAST_SIM_SOCIAL_TS
     try:
         init_prods = await ps_client.sync_products(force=False)
         for p in init_prods:
@@ -1013,6 +1326,7 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
     except Exception:
         pass
 
+    _LAST_SIM_SOCIAL_TS = time.time()
     loop_cnt = 0
     while True:
         await asyncio.sleep(60)
@@ -1038,6 +1352,34 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
 
             if restocked:
                 await post_restock_notification(client, restocked)
+
+            # 1. Nhắc nhở khách hàng bỏ dở đơn nạp VietQR sau 10-45 phút
+            await check_and_remind_abandoned_deposits(client)
+
+            # 2. Tự động đăng Bảng giá & Spotlight SP Hot theo khung giờ vàng (VD: 9h, 14h, 20h)
+            now_vn = datetime.now(VN_TZ)
+            if str(db.get_setting("auto_post_enabled", "1") or "0").strip() == "1":
+                raw_hours = db.get_setting("auto_post_hours", "9,14,20")
+                target_hours = {
+                    int(x.strip())
+                    for x in raw_hours.split(",")
+                    if x.strip().isdigit() and 0 <= int(x.strip()) <= 23
+                }
+                hour_key = now_vn.strftime("%Y-%m-%d-%H")
+                if now_vn.hour in target_hours and hour_key != _LAST_AUTO_POST_HOUR_KEY:
+                    _LAST_AUTO_POST_HOUR_KEY = hour_key
+                    await post_catalog_to_channel(client, pin=True, delete_old=True)
+                    await asyncio.sleep(2)
+                    await post_spotlight_to_channel(client)
+
+            # 3. Tự động đăng thông báo đơn hàng hoàn tất (Social Proof) định kỳ trong khung 08h - 22h
+            if (
+                str(db.get_setting("auto_social_proof_enabled", "1") or "0").strip() == "1"
+                and 8 <= now_vn.hour <= 22
+                and (time.time() - _LAST_SIM_SOCIAL_TS >= 12600.0)
+            ):
+                _LAST_SIM_SOCIAL_TS = time.time()
+                await post_simulated_social_proof(client)
 
             if loop_cnt % 15 == 0:
                 await check_and_alert_low_prodseller_balance(client)
@@ -1084,6 +1426,21 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     restock_status = "🟢 Đang BẬT" if restock_on else "🔴 Đang TẮT"
     low_bal_usd = float(settings.get("low_balance_threshold_usd", "5.0") or 0.0)
 
+    autopost_on = str(settings.get("auto_post_enabled", "1") or "0").strip() == "1"
+    autopost_hours = settings.get("auto_post_hours", "9,14,20")
+    autopost_status = f"🟢 Đang BẬT (`{autopost_hours}h`)" if autopost_on else "🔴 Đang TẮT"
+
+    gift_on = str(settings.get("newbie_gift_enabled", "1") or "0").strip() == "1"
+    gift_vch = settings.get("newbie_gift_voucher", "TANTHU10")
+    gift_pts = settings.get("newbie_gift_points", "5")
+    gift_status = f"🟢 Đang BẬT (`+{gift_pts} điểm & {gift_vch}`)" if gift_on else "🔴 Đang TẮT"
+
+    social_on = str(settings.get("auto_social_proof_enabled", "1") or "0").strip() == "1"
+    social_status = "🟢 Đang BẬT" if social_on else "🔴 Đang TẮT"
+
+    remind_on = str(settings.get("deposit_reminder_enabled", "1") or "0").strip() == "1"
+    remind_status = "🟢 Đang BẬT (sau 10p)" if remind_on else "🔴 Đang TẮT"
+
     fixed_val = vnd_int(settings.get("markup_fixed", "0"))
     pending_cnt = stats.get("pending_deposits_count", 0)
     text = (
@@ -1095,13 +1452,14 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
         f"💰 Tổng doanh thu: **{vnd_int(stats['total_revenue']):,}đ**\n"
         f"📉 Tổng giá vốn: **{vnd_int(stats['total_cost']):,}đ**\n"
         f"💵 **Lợi nhuận ròng: +{vnd_int(stats['total_profit']):,}đ**\n\n"
-        "🔧 **Cấu hình Giá, Khuyến mãi & Tự động hóa:**\n"
-        f"• Tăng giá tự động (Markup %): **+{settings['markup_percent']}%**\n"
-        f"• Cộng thêm cố định (Markup VNĐ): **+{fixed_val:,}đ**\n"
-        f"• Tỷ giá quy đổi vốn: **$1 = {int(rate):,}đ**\n"
-        f"• Hoa hồng giới thiệu: **+{settings.get('referral_commission_pct', '5.0')}%**\n"
+        "🔧 **Cấu hình Giá, Phễu Khách Hàng & Tự Động Đăng Kênh:**\n"
+        f"• Tăng giá tự động (Markup %): **+{settings['markup_percent']}%** (+{fixed_val:,}đ) | Tỷ giá: **$1 = {int(rate):,}đ**\n"
+        f"• ⏰ Tự động đăng bài Kênh theo giờ: **{autopost_status}**\n"
+        f"• 🎁 Phễu Quà Tân Thủ Join Kênh: **{gift_status}**\n"
+        f"• 🤖 Tạo hiệu ứng Đơn Mồi (Social Proof): **{social_status}**\n"
+        f"• 💡 Nhắc khách hoàn tất đơn nạp bỏ dở: **{remind_status}**\n"
         f"• 🎁 Khuyến mãi nạp tiền: **{bonus_status}**\n"
-        f"• 📣 Tự động báo Hàng Về (Restock) lên Kênh: **{restock_status}**\n"
+        f"• 📣 Tự động báo Hàng Về (Restock): **{restock_status}**\n"
         f"• VietQR: **{settings['bank_id']} - {settings['bank_account_no']} ({settings['bank_account_name']})**\n"
         f"• 🌙 SePay (23h-06h): **{sepay_status}**"
     )
@@ -1112,15 +1470,20 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
             Button.inline("📦 10 Đơn gần nhất", b"adm:orders"),
         ],
         [
-            Button.inline("🔍 Tra cứu Khách hàng", b"adm:finduser"),
-            Button.inline("📣 Gửi thông báo (Broadcast)", b"adm:broadcast"),
-        ],
-        [
-            Button.inline("📢 Đăng Bảng Giá lên @KingToolShopOfficial", b"adm:post_catalog", style="success"),
+            Button.inline("📢 Đăng Bảng Giá Kênh", b"adm:post_catalog", style="success"),
+            Button.inline("🔥 Đăng Bài SP Hot Ngay", b"adm:post_spotlight", style="primary"),
         ],
         [
             Button.inline("🏷️ Chỉnh giá riêng / Ẩn-Hiện từng SP (VNĐ)", b"adm:plist:0", style="primary"),
             Button.inline("🎟️ Quản lý Voucher", b"adm:vouchers", style="primary"),
+        ],
+        [
+            Button.inline(f"⏰ {'Tắt' if autopost_on else 'Bật'} Auto Đăng Kênh", b"adm:tog_autopost"),
+            Button.inline(f"🎁 {'Tắt' if gift_on else 'Bật'} Quà Tân Thủ", b"adm:tog_gift"),
+        ],
+        [
+            Button.inline(f"🤖 {'Tắt' if social_on else 'Bật'} Đơn Mồi Kênh", b"adm:tog_social"),
+            Button.inline(f"💡 {'Tắt' if remind_on else 'Bật'} Nhắc Đơn Nạp", b"adm:tog_depremind"),
         ],
         [
             Button.inline(f"🎁 {'Tắt' if bonus_on else 'Bật'} KM Nạp", b"adm:tog_bonus"),
@@ -1129,6 +1492,10 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
         [
             Button.inline(f"📣 {'Tắt' if restock_on else 'Bật'} Báo Restock", b"adm:tog_restock"),
             Button.inline("🔔 Mốc Báo Hết Vốn ($)", b"adm:set:low_balance_threshold_usd"),
+        ],
+        [
+            Button.inline("🔍 Tra cứu Khách hàng", b"adm:finduser"),
+            Button.inline("📣 Gửi thông báo (Broadcast)", b"adm:broadcast"),
         ],
         [
             Button.inline("📈 Chỉnh % Lợi nhuận", b"adm:set:markup_percent"),
@@ -1438,6 +1805,10 @@ async def run_bot() -> None:
             await render_product_detail(event, buy_pid, qty=1)
             return
 
+        if arg.upper() == "GIFT":
+            await render_newbie_gift_funnel(event, force_new=True)
+            return
+
         await event.respond(t(lang, "welcome_banner", admin=admin_user, channel=channel_user))
         await event.respond(
             t(lang, "main_menu_title", balance=vnd_int(u["balance"]), points=u["points"]),
@@ -1499,6 +1870,15 @@ async def run_bot() -> None:
 
         if data == "noop":
             await event.answer()
+            return
+
+        if data == "menu:gift":
+            await event.answer()
+            await render_newbie_gift_funnel(event)
+            return
+
+        if data == "gift:claim":
+            await handle_claim_newbie_gift(client, event)
             return
 
         if data == "menu:home":
@@ -1960,6 +2340,46 @@ async def run_bot() -> None:
                 await render_admin_home(event)
                 return
 
+            if data == "adm:tog_autopost":
+                cur = str(db.get_setting("auto_post_enabled", "1") or "0").strip() == "1"
+                new_val = "0" if cur else "1"
+                db.set_setting("auto_post_enabled", new_val)
+                await event.answer(
+                    "🟢 Đã BẬT tự động đăng bài Kênh theo khung giờ!" if new_val == "1" else "🔴 Đã TẮT tự động đăng bài Kênh!"
+                )
+                await render_admin_home(event)
+                return
+
+            if data == "adm:tog_gift":
+                cur = str(db.get_setting("newbie_gift_enabled", "1") or "0").strip() == "1"
+                new_val = "0" if cur else "1"
+                db.set_setting("newbie_gift_enabled", new_val)
+                await event.answer(
+                    "🟢 Đã BẬT Phễu Quà Tân Thủ Join Kênh!" if new_val == "1" else "🔴 Đã TẮT Phễu Quà Tân Thủ!"
+                )
+                await render_admin_home(event)
+                return
+
+            if data == "adm:tog_social":
+                cur = str(db.get_setting("auto_social_proof_enabled", "1") or "0").strip() == "1"
+                new_val = "0" if cur else "1"
+                db.set_setting("auto_social_proof_enabled", new_val)
+                await event.answer(
+                    "🟢 Đã BẬT tạo hiệu ứng Đơn Mồi (Social Proof) trên Kênh!" if new_val == "1" else "🔴 Đã TẮT Đơn Mồi!"
+                )
+                await render_admin_home(event)
+                return
+
+            if data == "adm:tog_depremind":
+                cur = str(db.get_setting("deposit_reminder_enabled", "1") or "0").strip() == "1"
+                new_val = "0" if cur else "1"
+                db.set_setting("deposit_reminder_enabled", new_val)
+                await event.answer(
+                    "🟢 Đã BẬT tự động nhắc khách hoàn tất đơn nạp bỏ dở!" if new_val == "1" else "🔴 Đã TẮT nhắc đơn nạp!"
+                )
+                await render_admin_home(event)
+                return
+
             if data.startswith("adm:warr_reply:"):
                 await event.answer()
                 _, _, target_uid_s, oid_s = data.split(":")
@@ -2054,15 +2474,31 @@ async def run_bot() -> None:
             if data == "adm:post_catalog":
                 await event.answer("⏳ Đang đăng Bảng giá & Kho hàng lên @KingToolShopOfficial...")
                 try:
-                    msg_id = await post_catalog_to_channel(client, pin=True)
+                    msg_id = await post_catalog_to_channel(client, pin=True, delete_old=True)
                     await event.respond(
-                        f"✅ Đã đăng và ghim **Bảng giá & Tồn kho tự động** lên kênh `@KingToolShopOfficial` (Msg `#{msg_id}`)!",
+                        f"✅ Đã đăng và ghim **Bảng giá & Tồn kho tự động** lên kênh `@KingToolShopOfficial` (Msg `#{msg_id}`, tự động xóa bài cũ)!",
                         buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
                     )
                 except Exception as exc:
                     await event.respond(
                         f"❌ Không thể đăng lên kênh `@KingToolShopOfficial`: `{exc}`\n"
                         "*(Hãy đảm bảo @KingToolShop_bot đã được cấp quyền Admin trong kênh!)*",
+                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    )
+                return
+
+            if data == "adm:post_spotlight":
+                await event.answer("⏳ Đang đăng bài Spotlight Sản Phẩm Hot + Đơn Mồi lên @KingToolShopOfficial...")
+                try:
+                    sp_mid = await post_spotlight_to_channel(client)
+                    await post_simulated_social_proof(client)
+                    await event.respond(
+                        f"🔥 Đã đăng bài **Spotlight Sản Phẩm Hot** (Msg `#{sp_mid}`) & **Thông báo Đơn hàng hoàn tất** lên `@KingToolShopOfficial` thành công!",
+                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    )
+                except Exception as exc:
+                    await event.respond(
+                        f"❌ Không thể đăng bài lên kênh `@KingToolShopOfficial`: `{exc}`",
                         buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
                     )
                 return

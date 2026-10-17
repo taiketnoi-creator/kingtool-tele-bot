@@ -5,6 +5,25 @@
 
 ---
 
+## [v2.6.0] - 2026-10-17: Hệ Thống Tự Động Đăng Bài Kênh Theo Lịch & Phễu Thu Hút - Chốt Khách Tự Động (4 Tầng)
+
+### 🎯 4 Tính năng Tự động đăng bài & Phễu thu hút khách hàng (Marketing Funnel)
+1. **⏰ Tự động đăng bài định kỳ theo khung giờ vàng & Tự dọn bài cũ (`auto_post_enabled`, `auto_post_hours = "9,14,20"`):**
+   - Mỗi ngày vào các khung giờ vàng (`09:00`, `14:00`, `20:00` Giờ Việt Nam), Bot tự động cập nhật **Bảng giá & Tồn kho thực tế** lên `@KingToolShopOfficial` và ghim bài.
+   - Tự động xóa bài Bảng giá cũ (`last_catalog_msg_id`) trước khi đăng bài mới để kênh luôn gọn đẹp, không bị rác tin nhắn.
+   - Tự động chọn ngẫu nhiên sản phẩm đang sẵn hàng để đăng bài **🔥 Spotlight Sản Phẩm Hot Trong Ngày** (`post_spotlight_to_channel`) kèm mô tả Tiếng Việt, giá sau khi áp mã giảm giá Tân thủ và nút Deep-link **`🛒 Mua ngay`** (`?start=BUY_<pid>`).
+   - Bổ sung nút **`🔥 Đăng Bài SP Hot Ngay`** (`adm:post_spotlight`) trong `/admin` để Admin có thể kích hoạt đăng ngay bất cứ lúc nào.
+2. **🎁 Phễu "Tham gia Kênh nhận Quà Tân Thủ" (`newbie_gift_enabled`, `?start=GIFT`, `users.gift_claimed`):**
+   - Khách mới vào Bot (hoặc bấm nút `🎁 Nhận Quà Tân Thủ` từ bài đăng trên kênh) sẽ thấy màn hình hướng dẫn tham gia kênh `@KingToolShopOfficial`.
+   - Khi bấm **`✅ Bước 2: Đã tham gia — Nhận Quà Ngay!`**, Bot tự động kiểm tra trạng thái thành viên trên kênh (`get_permissions`), tặng ngay **`+5 Điểm thưởng`** và **tự động gắn sẵn mã giảm giá `TANTHU10` (`-10%`) vào giỏ hàng** (`USER_ACTIVE_VOUCHER`).
+   - Khi khách bấm vào bất kỳ sản phẩm nào ngay sau đó, giá bán đã được gạch ngang giảm sẵn 10% (vẫn đi qua chốt chặn chống lỗ vốn `total_final_vnd >= total_cost_vnd`).
+3. **🤖 Tạo hiệu ứng đám đông tự động (`auto_social_proof_enabled`):**
+   - Bên cạnh thông báo đơn hàng thật (`post_order_social_proof`), trong khung giờ `08:00 – 22:00`, Bot định kỳ đăng thông báo hoàn tất đơn hàng (che ID dạng `6839***42`) kèm nút mua thẳng sản phẩm đó và tự động xóa thông báo mồi cũ trước đó để tạo uy tín cho khách mới vào kênh.
+4. **💡 Nhắc nhở tự động khi khách bỏ dở đơn nạp tiền (`deposit_reminder_enabled`):**
+   - Khi khách tạo mã QR VietQR mà sau `10–45 phút` đơn vẫn ở trạng thái `pending`, Bot tự động gửi tin nhắn hỗ trợ nhẹ nhàng kèm nút `✅ Tôi đã chuyển khoản`, nhắc ưu đãi nạp tiền (`+5% / +10%`) và link CSKH.
+
+---
+
 ## [v2.5.0] - 2026-10-17: Bộ 4 Tính Năng Vận Hành Tự Động & Tăng Doanh Thu (Cảnh Báo Vốn, Báo Restock Kênh, Khuyến Mãi Nạp Tiền, Bảo Hành 1 Chạm)
 
 ### 🚀 4 Nâng cấp vận hành & bán hàng tự động

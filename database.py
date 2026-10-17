@@ -52,6 +52,14 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "restock_notify_enabled": "1",       # Tự động đăng thông báo hàng về (Restock) lên kênh (1=Bật, 0=Tắt)
     "deposit_bonus_enabled": "1",        # Bật/Tắt khuyến mãi cộng thêm % khi nạp tiền theo mốc (1=Bật, 0=Tắt)
     "deposit_bonus_tiers": "200000:5,500000:10",  # Mốc nạp VNĐ : % thưởng thêm (VD: 200k +5%, 500k +10%)
+    "auto_post_enabled": "1",            # Tự động đăng Bảng giá & Spotlight SP Hot theo khung giờ (1=Bật, 0=Tắt)
+    "auto_post_hours": "9,14,20",        # Khung giờ vàng tự động đăng bài lên Kênh mỗi ngày (Giờ VN UTC+7)
+    "last_catalog_msg_id": "0",          # ID bài Bảng giá gần nhất trên Kênh (để xóa bài cũ tránh rác kênh)
+    "auto_social_proof_enabled": "1",    # Tự động đăng thông báo đơn hàng hoàn tất (Social Proof) định kỳ (1=Bật, 0=Tắt)
+    "newbie_gift_enabled": "1",          # Phễu nhận Quà Tân Thủ khi tham gia Kênh @KingToolShopOfficial (1=Bật, 0=Tắt)
+    "newbie_gift_voucher": "TANTHU10",   # Mã giảm giá tặng Tân thủ khi tham gia Kênh (mặc định giảm 10%)
+    "newbie_gift_points": "5",           # Số điểm thưởng tặng Tân thủ khi tham gia Kênh (mặc định +5 điểm)
+    "deposit_reminder_enabled": "1",     # Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút (1=Bật, 0=Tắt)
 }
 
 TIER_DISCOUNTS: dict[str, int] = {
@@ -234,8 +242,11 @@ class Database:
                         total_spent NUMERIC(18, 2) DEFAULT 0.0,
                         language TEXT DEFAULT 'vi',
                         referred_by BIGINT DEFAULT NULL,
+                        gift_claimed INTEGER DEFAULT 0,
                         joined_at TEXT NOT NULL
                     );
+
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS gift_claimed INTEGER DEFAULT 0;
 
                     CREATE TABLE IF NOT EXISTS product_overrides (
                         product_id TEXT PRIMARY KEY,
@@ -307,6 +318,14 @@ class Database:
                         "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
                         (k, v),
                     )
+                conn.execute(
+                    """
+                    INSERT INTO vouchers (code, discount_type, discount_value, max_uses, used_count, active, created_at)
+                    VALUES ('TANTHU10', 'percent', 10.0, 0, 0, 1, ?)
+                    ON CONFLICT (code) DO NOTHING
+                    """,
+                    (now_str(),),
+                )
             self._migrate_sqlite_to_postgres_if_needed()
             logger.info("☁️ Đã kết nối cơ sở dữ liệu đám mây Supabase PostgreSQL (Schema: telebot) thành công!")
         else:
@@ -328,6 +347,7 @@ class Database:
                         total_spent REAL DEFAULT 0.0,
                         language TEXT DEFAULT 'vi',
                         referred_by INTEGER DEFAULT NULL,
+                        gift_claimed INTEGER DEFAULT 0,
                         joined_at TEXT NOT NULL
                     );
 
@@ -396,11 +416,22 @@ class Database:
                     );
                     """
                 )
+                try:
+                    conn.execute("ALTER TABLE users ADD COLUMN gift_claimed INTEGER DEFAULT 0")
+                except Exception:
+                    pass
                 for k, v in DEFAULT_SETTINGS.items():
                     conn.execute(
                         "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
                         (k, v),
                     )
+                conn.execute(
+                    """
+                    INSERT OR IGNORE INTO vouchers (code, discount_type, discount_value, max_uses, used_count, active, created_at)
+                    VALUES ('TANTHU10', 'percent', 10.0, 0, 0, 1, ?)
+                    """,
+                    (now_str(),),
+                )
 
     def _migrate_sqlite_to_postgres_if_needed(self) -> None:
         """Đồng bộ dữ liệu sẵn có từ file shop.db ở local lên Supabase trong lần chạy đầu."""
@@ -719,6 +750,27 @@ class Database:
                 (telegram_id,),
             ).fetchone()
             return int(row["cnt"]) if row else 0
+
+    def claim_newbie_gift(self, telegram_id: int, bonus_points: int = 5) -> tuple[bool, int]:
+        """Nhận Quà Tân Thủ nguyên tử (mỗi khách chỉ được nhận 1 lần duy nhất).
+        Trả về (thành_công, tổng_điểm_hiện_tại).
+        """
+        pts_add = max(0, int(bonus_points))
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                UPDATE users
+                SET gift_claimed = 1,
+                    points = COALESCE(points, 0) + ?
+                WHERE telegram_id = ? AND COALESCE(gift_claimed, 0) = 0
+                """,
+                (pts_add, telegram_id),
+            )
+            ok = cur.rowcount == 1
+            row = conn.execute("SELECT points FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            cur_pts = int(row["points"] or 0) if row else 0
+        self._users_cache.pop(telegram_id, None)
+        return ok, cur_pts
 
     # --- Product Overrides & Retail Price Calculation (VNĐ - Có RAM Cache 60s) ---
     def get_product_override(self, product_id: str) -> dict[str, Any] | None:
@@ -1148,6 +1200,22 @@ class Database:
             rows = conn.execute(
                 "SELECT * FROM deposits WHERE status = 'pending' ORDER BY id DESC LIMIT ?",
                 (limit,),
+            ).fetchall()
+            return [dict(r) for r in rows]
+
+    def get_unreminded_pending_deposits(self, min_age_minutes: int = 10, max_age_minutes: int = 45) -> list[dict[str, Any]]:
+        """Lấy các đơn nạp đang pending được tạo trong khoảng [now - max_age_minutes, now - min_age_minutes] để nhắc khách."""
+        now_dt = datetime.now(VN_TZ)
+        older_than = (now_dt - timedelta(minutes=min_age_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        newer_than = (now_dt - timedelta(minutes=max_age_minutes)).strftime("%Y-%m-%d %H:%M:%S")
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM deposits
+                WHERE status = 'pending' AND created_at >= ? AND created_at <= ?
+                ORDER BY id ASC
+                """,
+                (newer_than, older_than),
             ).fetchall()
             return [dict(r) for r in rows]
 

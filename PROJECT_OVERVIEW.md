@@ -123,7 +123,19 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 - **Khuyến mãi nạp tiền theo mốc (`deposit_bonus_enabled`, `deposit_bonus_tiers`):** Tự động cộng thêm `%` tiền thưởng khi khách nạp đạt mốc (mặc định `200,000đ -> +5%`, `500,000đ -> +10%`), áp dụng cho cả duyệt tay và SePay ban đêm.
 - **Bảo hành 1 chạm & Phản hồi trực tiếp (`warr:ask:<id>` / `adm:warr_reply:`):** Khách bấm nút bảo hành ngay trong lịch sử đơn hàng, Admin nhận phiếu kèm mã đơn ProdSeller và bấm nút phản hồi/đổi Key trực tiếp qua Bot.
 
-### 5.6. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
+### 5.6. Hệ Thống Tự Động Đăng Bài Kênh & Phễu Thu Hút Khách Hàng (`v2.6.0`)
+- **⏰ Tự động đăng bài định kỳ theo khung giờ vàng (`auto_post_enabled`, `auto_post_hours = "9,14,20"`):**
+  - Tự động đăng & ghim Bảng giá + Tồn kho mới nhất lên `@KingToolShopOfficial` vào lúc `09:00`, `14:00`, `20:00` (Giờ VN) và tự động xóa bài Bảng giá cũ (`last_catalog_msg_id`) để kênh luôn sạch đẹp.
+  - Đi kèm bài **🔥 Spotlight Sản Phẩm Hot Trong Ngày** (`post_spotlight_to_channel`) giới thiệu chi tiết sản phẩm kèm mức giá sau khi áp mã Tân Thủ và nút Deep-link `🛒 Mua ngay` (`?start=BUY_<pid>`).
+- **🎁 Phễu "Tham gia Kênh nhận Quà Tân Thủ" (`newbie_gift_enabled`, `?start=GIFT`):**
+  - Hiển thị nút `🎁 Nhận Quà Tân Thủ (Miễn Phí)` ngay trên Menu Chính cho khách mới (`users.gift_claimed = 0`).
+  - Kiểm tra khách đã tham gia kênh `@KingToolShopOfficial` qua Telethon (`get_permissions`). Ngay khi khách Join kênh và bấm nhận quà, hệ thống cộng **+5 Điểm thưởng** và **tự động kích hoạt sẵn mã giảm giá `TANTHU10` (-10%)** vào giỏ hàng để khách xem bất kỳ sản phẩm nào cũng thấy giá đã được giảm ngay (vẫn tuân thủ tuyệt đối chốt chặn `>= cost_vnd`).
+- **🤖 Tạo hiệu ứng đám đông tự động (`auto_social_proof_enabled`):**
+  - Định kỳ trong khung `08:00 – 22:00`, tự động đăng thông báo hoàn tất đơn hàng lên kênh (kèm xóa bài mồi cũ để không làm loãng kênh), tạo niềm tin và độ sôi động cho khách mới vào xem.
+- **💡 Nhắc nhở tự động khi khách bỏ dở đơn nạp tiền (`deposit_reminder_enabled`):**
+  - Tự động phát hiện đơn nạp VietQR đang `pending` sau `10–45 phút` chưa hoàn tất và gửi tin nhắn nhắc nhở nhẹ nhàng kèm thông tin ưu đãi nạp tiền (`+5% / +10%`) và nút báo duyệt 1 chạm.
+
+### 5.7. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
 - Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s), `vouchers` (TTL 60s), `api_keys` (TTL 45s) và `users` (TTL 45s).
 - Tuyệt đối **KHÔNG** thực hiện truy vấn SQL lặp trong vòng lặp hiển thị danh sách sản phẩm (tránh lỗi N+1 Query).
 - `prodseller_client.py` sử dụng cơ chế **Stale-While-Revalidate**: trả về danh sách sản phẩm từ RAM ngay lập tức (`force=False`) và đồng bộ ngầm mỗi 45 giây.
@@ -132,10 +144,11 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 
 ## 6. Định Hướng Phát Triển Tiếp Theo (Roadmap)
 
-- **Tính năng đã hoàn thành gần nhất (`v2.3.0`, `v2.4.0` & `v2.5.0`):**
+- **Tính năng đã hoàn thành gần nhất (`v2.3.0`, `v2.4.0`, `v2.5.0` & `v2.6.0`):**
   - **Hệ thống Mã Giảm Giá (Voucher System - bảng `telebot.vouchers` & `telebot.voucher_usages`)** kèm chốt chặn bảo vệ giá vốn (`total_final_vnd >= total_cost_vnd`).
   - **Cổng Public Reseller API v1 (`public_api.py` - bảng `telebot.api_keys`) & Trang tài liệu `/api-docs`** kèm mục giải thích dễ hiểu cho khách hàng trên Bot.
   - **Bộ 4 tính năng vận hành tự động (`v2.5.0`):** Cảnh báo hết vốn ProdSeller, Tự động đăng Restock lên Kênh kèm Deep-link mua ngay, Khuyến mãi nạp tiền theo mốc, và Bảo hành 1 chạm trong Lịch sử đơn hàng.
+  - **Hệ thống Tự Động Đăng Bài Kênh & Phễu Thu Hút Khách Hàng (`v2.6.0`):** Tự động đăng Bảng giá + Spotlight SP Hot theo khung giờ (`9h, 14h, 20h`, tự xóa bài cũ), Phễu bắt buộc Join Kênh nhận Quà Tân Thủ (`+5 điểm` + tự động gắn mã `TANTHU10`), Tự động tạo hiệu ứng đơn hàng hoàn tất (Social Proof), và Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút.
 
 ---
 
