@@ -54,7 +54,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "redeem_points_success": "🎉 Đổi thành công **{pts} điểm** lấy **+{bonus:,}đ** vào ví!\n💰 Số dư mới: **{new_bal:,}đ**",
         "deposit_title": "💳 Phương thức nạp tiền\nChọn phương thức thanh toán:",
         "vietqr_method_btn": "🏦 Chuyển khoản Ngân hàng (VietQR Tự Động)",
-        "deposit_choose_amount": "💵 Chọn mệnh giá muốn nạp (VNĐ):",
+        "deposit_choose_amount": "💵 Chọn mệnh giá muốn nạp (VNĐ):{bonus_banner}",
         "custom_amount_btn": "✍️ Nhập số tiền khác (VNĐ)",
         "custom_deposit_prompt": "💵 Vui lòng nhập **số tiền VNĐ** bạn muốn nạp (tối thiểu `10,000đ`, ví dụ: `50000` hoặc `50k`):",
         "custom_deposit_invalid": "❌ Vui lòng nhập số tiền hợp lệ từ `10,000đ` trở lên (ví dụ: `50000` hoặc `50k`):",
@@ -82,7 +82,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "✅ **Nạp tiền thành công (Kèm Thưởng Khuyến Mãi)!**\n\n"
             "🧾 Mã đơn nạp: `#{dep_id}`\n"
             "💵 Tiền nạp gốc: **+{amt_vnd:,}đ**\n"
-            "🎁 Thưởng nạp (+{bonus_pct:g}%): **+{bonus_vnd:,}đ**\n"
+            "🎁 Thưởng nạp (+{bonus_pct}%): **+{bonus_vnd:,}đ**\n"
             "💰 Tổng cộng vào ví: **+{total_added:,}đ**\n"
             "🏦 Số dư hiện tại: **{new_bal:,}đ**\n\n"
             "Bấm /start để bắt đầu mua hàng ngay!"
@@ -256,7 +256,7 @@ STRINGS: dict[str, dict[str, str]] = {
         "redeem_points_success": "🎉 Redeemed **{pts} points** for **+{bonus:,}đ**!\n💰 New Balance: **{new_bal:,}đ**",
         "deposit_title": "💳 Deposit Methods\nChoose a payment method:",
         "vietqr_method_btn": "🏦 Bank Transfer (Automated VietQR)",
-        "deposit_choose_amount": "💵 Select deposit amount (VNĐ):",
+        "deposit_choose_amount": "💵 Select deposit amount (VNĐ):{bonus_banner}",
         "custom_amount_btn": "✍️ Enter custom amount (VNĐ)",
         "custom_deposit_prompt": "💵 Please enter the **amount in VNĐ** you want to deposit (minimum `10,000đ`, e.g. `50000` or `50k`):",
         "custom_deposit_invalid": "❌ Please enter a valid amount from `10,000đ` or more (e.g. `50000` or `50k`):",
@@ -284,7 +284,7 @@ STRINGS: dict[str, dict[str, str]] = {
             "✅ **Deposit Approved (With Bonus)!**\n\n"
             "🧾 Deposit ID: `#{dep_id}`\n"
             "💵 Deposit Amount: **+{amt_vnd:,}đ**\n"
-            "🎁 Bonus (+{bonus_pct:g}%): **+{bonus_vnd:,}đ**\n"
+            "🎁 Bonus (+{bonus_pct}%): **+{bonus_vnd:,}đ**\n"
             "💰 Total Credited: **+{total_added:,}đ**\n"
             "🏦 Current Balance: **{new_bal:,}đ**\n\n"
             "Send /start to start shopping now!"

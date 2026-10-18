@@ -2213,7 +2213,13 @@ async def run_bot() -> None:
             }
             await send_or_edit(
                 event,
-                t(lang, "warr_prompt", order_id=oid, name=o["product_name"]),
+                t(
+                    lang,
+                    "warr_prompt",
+                    order_id=oid,
+                    name=o["product_name"],
+                    keys=format_order_keys_preview(o.get("delivered_keys", "")),
+                ),
                 buttons=[[Button.inline(t(lang, "btn_back"), b"prof:orders")]],
             )
             return
@@ -2847,7 +2853,7 @@ async def run_bot() -> None:
                 except Exception:
                     pass
             await event.respond(
-                t(lang, "warr_sent", order_id=oid),
+                t(lang, "warr_sent", order_id=oid, issue=text),
                 buttons=[[Button.inline(t(lang, "btn_back"), b"prof:orders")]],
             )
             return

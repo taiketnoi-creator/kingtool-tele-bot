@@ -5,6 +5,16 @@
 
 ---
 
+## [v2.6.1] - 2026-10-18: Vá Lỗi Hiển Thị Biến Chuỗi Tin Nhắn Nạp Tiền Kèm Khuyến Mãi & Bảo Hành
+
+### 🛠️ Sửa lỗi (Bug Fixes)
+- **Tin nhắn duyệt nạp tiền có thưởng (`deposit_approved_bonus_msg` trong `i18n.py`):**
+  - Khắc phục lỗi xung đột định dạng `{bonus_pct:g}` khi `bot.py` truyền chuỗi `bonus_pct=f"{bonus_pct:g}"` khiến `.format()` báo lỗi `ValueError` và trả về chuỗi thô `#{dep_id}`, `+{amt_vnd:,}đ`. Đổi sang `{bonus_pct}` đồng bộ cho cả Tiếng Việt và Tiếng Anh.
+- **Hiển thị Banner Khuyến mãi nạp tiền (`deposit_choose_amount`) & Thông báo Bảo hành (`warr_prompt`, `warr_sent`):**
+  - Bổ sung `{bonus_banner}` vào `deposit_choose_amount` trong `i18n.py` và truyền đầy đủ tham số `keys`, `issue` trong `bot.py` để đảm bảo 100% mẫu câu đa ngôn ngữ hiển thị chuẩn xác.
+
+---
+
 ## [v2.6.0] - 2026-10-17: Hệ Thống Tự Động Đăng Bài Kênh Theo Lịch & Phễu Thu Hút - Chốt Khách Tự Động (4 Tầng)
 
 ### 🎯 4 Tính năng Tự động đăng bài & Phễu thu hút khách hàng (Marketing Funnel)
