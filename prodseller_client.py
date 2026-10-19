@@ -479,12 +479,15 @@ class ProdSellerClient:
         self.dante_base_url = (dante_base_url or os.getenv("DANTE_BASE_URL", DANTE_BASE_URL)).strip()
         self._products_cache: list[dict[str, Any]] = []
         self._stock_cache: dict[str, int | None] = {}
+        self._detail_refresh_ts: dict[str, float] = {}
         self._last_sync: float = 0.0
         self._lock = asyncio.Lock()
         self._http: httpx.AsyncClient | None = None
         self._dante_products_cache: list[dict[str, Any]] = []
         self._dante_last_sync: float = 0.0
         self._linked_dante_ids: set[str] = {dh_id for _, dh_id, _ in DEFAULT_DANTE_MAPPINGS} | set(EXTRA_SKIP_DANTE_IDS)
+        self._ps_balance_cache: tuple[float, dict[str, Any]] | None = None
+        self._ext_balance_cache: dict[str, tuple[float, dict[str, Any]]] = {}
 
     def set_dante_credentials(self, api_key: str, base_url: str = DANTE_BASE_URL) -> None:
         if api_key and api_key.strip():
@@ -501,7 +504,7 @@ class ProdSellerClient:
         if self._http is None or self._http.is_closed:
             self._http = httpx.AsyncClient(
                 timeout=20.0,
-                limits=httpx.Limits(max_keepalive_connections=10, max_connections=20),
+                limits=httpx.Limits(max_keepalive_connections=15, max_connections=30),
             )
         return self._http
 
@@ -540,20 +543,31 @@ class ProdSellerClient:
             h["Idempotency-Key"] = idempotency_key[:100]
         return h
 
-    async def get_balance(self) -> dict[str, Any]:
+    async def get_balance(self, force: bool = False) -> dict[str, Any]:
+        now = time.time()
+        if not force and self._ps_balance_cache and (now - self._ps_balance_cache[0] < 30.0):
+            return self._ps_balance_cache[1]
         client = self._get_http()
         resp = await client.get(f"{BASE_URL}/balance", headers=self._headers())
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        self._ps_balance_cache = (now, data)
+        return data
 
     async def get_external_balance(
         self,
         api_base_url: str = DANTE_BASE_URL,
         api_key: str = "",
+        force: bool = False,
     ) -> dict[str, Any]:
-        """Lấy số dư ví USDT trên @DanteHubBot hoặc cổng Reseller API ngoài."""
+        """Lấy số dư ví USDT trên @DanteHubBot hoặc cổng Reseller API ngoài (có RAM Cache 30s)."""
         base = self._normalize_external_base(api_base_url or self.dante_base_url)
         key = (api_key or self.dante_api_key).strip()
+        cache_k = f"{base}|{key[:12]}"
+        now = time.time()
+        cached = self._ext_balance_cache.get(cache_k)
+        if not force and cached and (now - cached[0] < 30.0):
+            return cached[1]
         client = self._get_http()
         resp = await client.get(
             f"{base}/balance",
@@ -561,7 +575,9 @@ class ProdSellerClient:
             timeout=12.0,
         )
         resp.raise_for_status()
-        return resp.json()
+        data = resp.json()
+        self._ext_balance_cache[cache_k] = (now, data)
+        return data
 
     async def fetch_dantehub_catalog(
         self,
@@ -624,9 +640,10 @@ class ProdSellerClient:
         data = resp.json()
         if "stock" in data:
             self._stock_cache[product_id] = data["stock"]
+        self._detail_refresh_ts[product_id] = time.time()
         return data
 
-    async def sync_products(self, force: bool = False, cache_ttl: float = 60.0) -> list[dict[str, Any]]:
+    async def sync_products(self, force: bool = False, cache_ttl: float = 90.0) -> list[dict[str, Any]]:
         """Lấy danh sách sản phẩm hợp nhất từ cả @ProdSellerBot và @DanteHubBot (142+ sản phẩm).
         Sử dụng cơ chế Stale-While-Revalidate: nếu đã có cache và force=False, trả về ngay lập tức
         để người dùng không bao giờ phải chờ, đồng thời tự động làm mới ngầm nếu cache đã quá hạn.
@@ -642,52 +659,56 @@ class ProdSellerClient:
     async def _refresh_products_internal(self) -> list[dict[str, Any]]:
         async with self._lock:
             client = self._get_http()
-            ps_products: list[dict[str, Any]] = []
-            try:
-                resp = await client.get(f"{BASE_URL}/products", headers=self._headers())
-                resp.raise_for_status()
-                products: list[dict[str, Any]] = resp.json().get("products", [])
 
-                sem = asyncio.Semaphore(8)
+            async def _sync_ps() -> list[dict[str, Any]]:
+                try:
+                    resp = await client.get(f"{BASE_URL}/products", headers=self._headers())
+                    resp.raise_for_status()
+                    products: list[dict[str, Any]] = resp.json().get("products", [])
+                    sem = asyncio.Semaphore(14)
 
-                async def _fetch_stock(p: dict[str, Any]) -> None:
-                    pid = p["id"]
-                    p["provider"] = "prodseller"
-                    if not p.get("inStock", False):
-                        self._stock_cache[pid] = 0
-                        p["stock"] = 0
-                        return
-                    async with sem:
-                        try:
-                            r = await client.get(f"{BASE_URL}/products/{pid}", headers=self._headers())
-                            if r.status_code == 200:
-                                detail = r.json()
-                                st = detail.get("stock")
-                                self._stock_cache[pid] = st
-                                p["stock"] = st
-                        except Exception as exc:
-                            logging.debug("Không lấy được stock chi tiết %s: %s", pid, exc)
-                            p["stock"] = self._stock_cache.get(pid)
+                    async def _fetch_stock(p: dict[str, Any]) -> None:
+                        pid = p["id"]
+                        p["provider"] = "prodseller"
+                        if not p.get("inStock", False):
+                            self._stock_cache[pid] = 0
+                            p["stock"] = 0
+                            return
+                        async with sem:
+                            try:
+                                r = await client.get(f"{BASE_URL}/products/{pid}", headers=self._headers())
+                                if r.status_code == 200:
+                                    detail = r.json()
+                                    st = detail.get("stock")
+                                    self._stock_cache[pid] = st
+                                    self._detail_refresh_ts[pid] = time.time()
+                                    p["stock"] = st
+                            except Exception as exc:
+                                logging.debug("Không lấy được stock chi tiết %s: %s", pid, exc)
+                                p["stock"] = self._stock_cache.get(pid)
 
-                await asyncio.gather(*(_fetch_stock(p) for p in products))
-                ps_products = list(reversed(products))
-            except Exception as exc:
-                logging.warning("Không đồng bộ được danh sách ProdSeller: %s", exc)
-                ps_products = [p for p in self._products_cache if p.get("provider") == "prodseller"]
+                    await asyncio.gather(*(_fetch_stock(p) for p in products))
+                    return list(reversed(products))
+                except Exception as exc:
+                    logging.warning("Không đồng bộ được danh sách ProdSeller: %s", exc)
+                    return [p for p in self._products_cache if p.get("provider") == "prodseller"]
 
-            dante_exclusive: list[dict[str, Any]] = []
-            if self.dante_api_key:
+            async def _sync_dante() -> list[dict[str, Any]]:
+                if not self.dante_api_key:
+                    return []
                 try:
                     dh_catalog = await self.fetch_dantehub_catalog(
                         self.dante_base_url,
                         self.dante_api_key,
-                        force=True,
+                        force=False,
+                        cache_ttl=45.0,
                     )
                     skip_ids = (
                         {dh_id for _, dh_id, _ in DEFAULT_DANTE_MAPPINGS}
                         | set(EXTRA_SKIP_DANTE_IDS)
                         | self._linked_dante_ids
                     )
+                    excl: list[dict[str, Any]] = []
                     for item in dh_catalog:
                         dh_uuid = str(item.get("id", "")).strip()
                         if not dh_uuid or dh_uuid in skip_ids:
@@ -700,7 +721,7 @@ class ProdSellerClient:
                         cat = str(item.get("category") or "").strip()
                         desc = str(item.get("description") or "").strip()
                         price_usd = float(item.get("price", 0) or 0)
-                        dante_exclusive.append(
+                        excl.append(
                             {
                                 "id": short_id,
                                 "dante_uuid": dh_uuid,
@@ -713,9 +734,12 @@ class ProdSellerClient:
                                 "stock": st_val if in_st else 0,
                             }
                         )
+                    return excl
                 except Exception as exc:
                     logging.warning("Không đồng bộ được danh sách độc quyền DanteHub: %s", exc)
-                    dante_exclusive = [p for p in self._products_cache if p.get("provider") == "dantehub"]
+                    return [p for p in self._products_cache if p.get("provider") == "dantehub"]
+
+            ps_products, dante_exclusive = await asyncio.gather(_sync_ps(), _sync_dante())
 
             if ps_products or dante_exclusive:
                 self._products_cache = ps_products + dante_exclusive
@@ -723,35 +747,39 @@ class ProdSellerClient:
             return self._products_cache
 
     async def get_product_by_id(self, product_id: str, refresh: bool = False) -> dict[str, Any] | None:
-        """Lấy thông tin 1 sản phẩm (từ ProdSeller hoặc DanteHub). Nếu refresh=True chỉ làm mới đúng nguồn của sản phẩm."""
+        """Lấy thông tin 1 sản phẩm (từ ProdSeller hoặc DanteHub). Nếu refresh=True chỉ làm mới đúng nguồn khi đã quá 30s."""
         if not self._products_cache:
             await self.sync_products(force=True)
 
         target = str(product_id).strip()
+        now = time.time()
         for p in self._products_cache:
             if p["id"] == target or p.get("dante_uuid") == target:
                 if refresh:
                     try:
                         if p.get("provider") == "dantehub":
-                            dh_uuid = str(p.get("dante_uuid") or target)
-                            detail = await self.fetch_external_api_product(
-                                self.dante_base_url,
-                                self.dante_api_key,
-                                dh_uuid,
-                                force_refresh=True,
-                            )
-                            if detail:
+                            if now - self._dante_last_sync >= 30.0:
+                                dh_uuid = str(p.get("dante_uuid") or target)
+                                detail = await self.fetch_external_api_product(
+                                    self.dante_base_url,
+                                    self.dante_api_key,
+                                    dh_uuid,
+                                    force_refresh=True,
+                                )
+                                if detail:
+                                    p["stock"] = detail.get("stock", p.get("stock"))
+                                    p["price"] = detail.get("price", p.get("price"))
+                                    p["inStock"] = detail.get("inStock", p.get("inStock"))
+                        else:
+                            last_ref = self._detail_refresh_ts.get(p["id"], 0.0)
+                            if now - last_ref >= 30.0:
+                                detail = await self.fetch_product_detail(p["id"])
                                 p["stock"] = detail.get("stock", p.get("stock"))
                                 p["price"] = detail.get("price", p.get("price"))
-                                p["inStock"] = detail.get("inStock", p.get("inStock"))
-                        else:
-                            detail = await self.fetch_product_detail(p["id"])
-                            p["stock"] = detail.get("stock", p.get("stock"))
-                            p["price"] = detail.get("price", p.get("price"))
-                            if "inStock" in detail:
-                                p["inStock"] = detail["inStock"]
-                            elif isinstance(p.get("stock"), int):
-                                p["inStock"] = p["stock"] > 0
+                                if "inStock" in detail:
+                                    p["inStock"] = detail["inStock"]
+                                elif isinstance(p.get("stock"), int):
+                                    p["inStock"] = p["stock"] > 0
                     except Exception:
                         pass
                 return p
@@ -1053,6 +1081,7 @@ class ProdSellerClient:
         linked_cnt = 0
         in_stock_cnt = 0
         new_linked_ids: set[str] = {dh_id for _, dh_id, _ in DEFAULT_DANTE_MAPPINGS} | set(EXTRA_SKIP_DANTE_IDS)
+        pending_updates: list[tuple[int, int, int | None]] = []
         for _, src_list in bmap.items():
             for src in src_list:
                 if src.get("source_type") != "api":
@@ -1073,7 +1102,13 @@ class ProdSellerClient:
                     in_stock_cnt += 1
                 usd_price = float(dh_item.get("price", 0) or 0)
                 new_cost = max(500, int(round(usd_price * rate))) if usd_price > 0 else None
-                db.update_api_backup_stock(int(src["id"]), new_st, new_cost)
+                old_st = int(src.get("remote_stock", 0) or 0)
+                old_cost = int(src.get("cost_vnd", 0) or 0)
+                if old_st != new_st or (new_cost is not None and abs(old_cost - new_cost) >= 10):
+                    pending_updates.append((int(src["id"]), new_st, new_cost))
+
+        if pending_updates:
+            db.bulk_update_api_backup_stocks(pending_updates)
 
         self._linked_dante_ids = new_linked_ids
         return {"linked": linked_cnt, "in_stock": in_stock_cnt, "seeded": seeded}

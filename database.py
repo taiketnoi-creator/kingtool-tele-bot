@@ -333,10 +333,14 @@ class Database:
                     );
                     """
                 )
-                for k, v in DEFAULT_SETTINGS.items():
+                if DEFAULT_SETTINGS:
+                    placeholders = ", ".join(["(?, ?)"] * len(DEFAULT_SETTINGS))
+                    flat_params: list[Any] = []
+                    for k, v in DEFAULT_SETTINGS.items():
+                        flat_params.extend([k, v])
                     conn.execute(
-                        "INSERT INTO settings (key, value) VALUES (?, ?) ON CONFLICT (key) DO NOTHING",
-                        (k, v),
+                        f"INSERT INTO settings (key, value) VALUES {placeholders} ON CONFLICT (key) DO NOTHING",
+                        flat_params,
                     )
                 conn.execute(
                     """
@@ -347,6 +351,7 @@ class Database:
                     (now_str(),),
                 )
             self._migrate_sqlite_to_postgres_if_needed()
+            self.warm_all_caches()
             logger.info("☁️ Đã kết nối cơ sở dữ liệu đám mây Supabase PostgreSQL (Schema: telebot) thành công!")
         else:
             with self._conn() as conn:
@@ -467,6 +472,52 @@ class Database:
                     """,
                     (now_str(),),
                 )
+            self.warm_all_caches()
+
+    def warm_all_caches(self) -> None:
+        """Nạp toàn bộ bảng cấu hình, giá ghi đè, voucher và nguồn dự phòng vào RAM trong 1 kết nối duy nhất."""
+        import time
+
+        try:
+            now = time.monotonic()
+            with self._conn() as conn:
+                # 1. Settings
+                s_rows = conn.execute("SELECT key, value FROM settings").fetchall()
+                s_res = dict(DEFAULT_SETTINGS)
+                for r in s_rows:
+                    s_res[r["key"]] = r["value"]
+                self._settings_cache = s_res
+                self._settings_cache_ts = now
+
+                # 2. Product Overrides
+                ov_rows = conn.execute("SELECT * FROM product_overrides").fetchall()
+                self._overrides_cache = {r["product_id"]: dict(r) for r in ov_rows}
+                self._overrides_cache_ts = now
+
+                # 3. Vouchers
+                v_rows = conn.execute("SELECT * FROM vouchers ORDER BY created_at DESC").fetchall()
+                self._vouchers_cache = {str(r["code"]).upper(): dict(r) for r in v_rows}
+                self._vouchers_cache_ts = now
+
+                # 4. Backup Sources
+                b_rows = conn.execute("SELECT * FROM backup_sources ORDER BY cost_vnd ASC, id ASC").fetchall()
+                grouped: dict[str, list[dict[str, Any]]] = {}
+                for r in b_rows:
+                    d = dict(r)
+                    pid = str(d.get("product_id", ""))
+                    keys = self._parse_stock_keys(d.get("stock_keys", "[]"))
+                    d["stock_keys_list"] = keys
+                    stype = str(d.get("source_type", "local_stock") or "local_stock")
+                    d["cost_vnd"] = int(round(float(d.get("cost_vnd", 0) or 0)))
+                    if stype == "api":
+                        d["available_stock"] = max(0, int(d.get("remote_stock", 0) or 0))
+                    else:
+                        d["available_stock"] = len(keys)
+                    grouped.setdefault(pid, []).append(d)
+                self._backup_sources_cache = grouped
+                self._backup_sources_cache_ts = now
+        except Exception as exc:
+            logger.debug("Không thể làm nóng bộ đệm RAM lúc khởi động: %s", exc)
 
     def _migrate_sqlite_to_postgres_if_needed(self) -> None:
         """Đồng bộ dữ liệu sẵn có từ file shop.db ở local lên Supabase trong lần chạy đầu."""
@@ -622,7 +673,7 @@ class Database:
         import time
 
         now = time.monotonic()
-        if self._settings_cache is not None and (now - self._settings_cache_ts < 60.0):
+        if self._settings_cache is not None and (now - self._settings_cache_ts < 600.0):
             return dict(self._settings_cache)
         with self._conn() as conn:
             rows = conn.execute("SELECT key, value FROM settings").fetchall()
@@ -633,13 +684,13 @@ class Database:
             self._settings_cache_ts = now
             return dict(result)
 
-    # --- Users (Có RAM Cache 45s + Tự động xóa cache khi đổi số dư/ngôn ngữ) ---
+    # --- Users (Có RAM Cache 180s + Tự động xóa cache khi đổi số dư/ngôn ngữ) ---
     def get_or_create_user(self, telegram_id: int, username: str = "", referred_by: int | None = None) -> dict[str, Any]:
         import time
 
         now = time.monotonic()
         cached = self._users_cache.get(telegram_id)
-        if cached is not None and (now - cached[0] < 45.0):
+        if cached is not None and (now - cached[0] < 180.0):
             u_cached = cached[1]
             if not username or u_cached.get("username") == username:
                 return dict(u_cached)
@@ -807,7 +858,7 @@ class Database:
         self._users_cache.pop(telegram_id, None)
         return ok, cur_pts
 
-    # --- Product Overrides & Retail Price Calculation (VNĐ - Có RAM Cache 60s) ---
+    # --- Product Overrides & Retail Price Calculation (VNĐ - Có RAM Cache 600s) ---
     def get_product_override(self, product_id: str) -> dict[str, Any] | None:
         all_ov = self.get_all_overrides()
         return all_ov.get(product_id)
@@ -816,7 +867,7 @@ class Database:
         import time
 
         now = time.monotonic()
-        if self._overrides_cache is not None and (now - self._overrides_cache_ts < 60.0):
+        if self._overrides_cache is not None and (now - self._overrides_cache_ts < 600.0):
             return dict(self._overrides_cache)
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM product_overrides").fetchall()
@@ -865,7 +916,7 @@ class Database:
         rate = float(self.get_setting("vnd_rate", "25500") or 25500.0)
         return int(round(wholesale_usd * rate))
 
-    # --- Backup Supply Sources (Đa Nguồn Hàng Dự Phòng + RAM Cache 60s) ---
+    # --- Backup Supply Sources (Đa Nguồn Hàng Dự Phòng + RAM Cache 600s) ---
     @staticmethod
     def _parse_stock_keys(raw: Any) -> list[str]:
         if isinstance(raw, list):
@@ -880,11 +931,11 @@ class Database:
         return []
 
     def get_all_backup_sources(self) -> dict[str, list[dict[str, Any]]]:
-        """Lấy toàn bộ nguồn hàng dự phòng theo từng product_id (RAM Cache 60s, sắp xếp giá vốn rẻ nhất trước)."""
+        """Lấy toàn bộ nguồn hàng dự phòng theo từng product_id (RAM Cache 600s, sắp xếp giá vốn rẻ nhất trước)."""
         import time
 
         now = time.monotonic()
-        if self._backup_sources_cache is not None and (now - self._backup_sources_cache_ts < 60.0):
+        if self._backup_sources_cache is not None and (now - self._backup_sources_cache_ts < 600.0):
             return {pid: [dict(item) for item in items] for pid, items in self._backup_sources_cache.items()}
 
         with self._conn() as conn:
@@ -1090,18 +1141,26 @@ class Database:
         )
 
     def update_api_backup_stock(self, source_id: int, remote_stock: int, cost_vnd: int | None = None) -> None:
+        self.bulk_update_api_backup_stocks([(source_id, remote_stock, cost_vnd)])
+
+    def bulk_update_api_backup_stocks(self, updates: list[tuple[int, int, int | None]]) -> int:
+        """Cập nhật hàng loạt tồn kho & giá vốn nguồn dự phòng API chỉ trong 1 kết nối DB duy nhất."""
+        if not updates:
+            return 0
         with self._conn() as conn:
-            if cost_vnd is not None and cost_vnd > 0:
-                conn.execute(
-                    "UPDATE backup_sources SET remote_stock = ?, cost_vnd = ? WHERE id = ?",
-                    (max(0, int(remote_stock)), int(cost_vnd), int(source_id)),
-                )
-            else:
-                conn.execute(
-                    "UPDATE backup_sources SET remote_stock = ? WHERE id = ?",
-                    (max(0, int(remote_stock)), int(source_id)),
-                )
+            for source_id, remote_stock, cost_vnd in updates:
+                if cost_vnd is not None and cost_vnd > 0:
+                    conn.execute(
+                        "UPDATE backup_sources SET remote_stock = ?, cost_vnd = ? WHERE id = ?",
+                        (max(0, int(remote_stock)), int(cost_vnd), int(source_id)),
+                    )
+                else:
+                    conn.execute(
+                        "UPDATE backup_sources SET remote_stock = ? WHERE id = ?",
+                        (max(0, int(remote_stock)), int(source_id)),
+                    )
         self._backup_sources_cache = None
+        return len(updates)
 
     def toggle_backup_source(self, source_id: int) -> bool:
         with self._conn() as conn:
@@ -1396,12 +1455,12 @@ class Database:
             return base_vnd, base_vnd, 0
         return base_vnd, final_vnd, disc_pct
 
-    # --- Vouchers (Mã Giảm Giá + Chốt chặn chống lỗ vốn + RAM Cache 60s) ---
+    # --- Vouchers (Mã Giảm Giá + Chốt chặn chống lỗ vốn + RAM Cache 600s) ---
     def get_all_vouchers(self) -> dict[str, dict[str, Any]]:
         import time
 
         now = time.monotonic()
-        if self._vouchers_cache is not None and (now - self._vouchers_cache_ts < 60.0):
+        if self._vouchers_cache is not None and (now - self._vouchers_cache_ts < 600.0):
             return dict(self._vouchers_cache)
         with self._conn() as conn:
             rows = conn.execute("SELECT * FROM vouchers ORDER BY created_at DESC").fetchall()

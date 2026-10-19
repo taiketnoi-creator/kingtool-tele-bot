@@ -1417,7 +1417,7 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
         await asyncio.sleep(60)
         loop_cnt += 1
         try:
-            # Đồng bộ tồn kho các nguồn API dự phòng (@DanteHubBot & các API khác) mỗi 5 phút
+            # Đồng bộ tồn kho các nguồn API dự phòng (@DanteHubBot & các API khác) + làm mới bộ đệm DB ngầm mỗi 5 phút
             if loop_cnt % 5 == 1:
                 d_key = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
                 d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
@@ -1429,6 +1429,7 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
 
                 bmap_now = db.get_all_backup_sources()
                 rate_now = float(db.get_setting("vnd_rate", "25500") or 25500.0)
+                ext_updates: list[tuple[int, int, int | None]] = []
                 for _, src_list in bmap_now.items():
                     for src in src_list:
                         if src.get("source_type") == "api" and int(src.get("active", 0) or 0) == 1:
@@ -1446,7 +1447,13 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
                                 new_cost = None
                                 if r_price > 0:
                                     new_cost = int(round(r_price)) if r_price >= 500 else int(round(r_price * rate_now))
-                                db.update_api_backup_stock(int(src["id"]), new_st, new_cost)
+                                old_st = int(src.get("remote_stock", 0) or 0)
+                                old_cost = int(src.get("cost_vnd", 0) or 0)
+                                if old_st != new_st or (new_cost is not None and abs(old_cost - new_cost) >= 10):
+                                    ext_updates.append((int(src["id"]), new_st, new_cost))
+                if ext_updates:
+                    db.bulk_update_api_backup_stocks(ext_updates)
+                db.warm_all_caches()
 
             products = await ps_client.sync_products(force=True)
             overrides = db.get_all_overrides()
@@ -1519,28 +1526,30 @@ SETTING_PARENT_FOLDER: dict[str, str] = {
 
 
 async def _fetch_admin_supplier_balances(settings: dict[str, str], rate: float) -> tuple[str, str]:
-    ps_bal_str = "Đang kiểm tra..."
-    try:
-        b_info = await ps_client.get_balance()
-        ps_usd = float(b_info.get("balance", 0.0))
-        ps_vnd = int(round(ps_usd * rate))
-        ps_bal_str = f"{ps_vnd:,}đ (${ps_usd:.2f} | Hạng: {b_info.get('membership', 'bronze')})"
-    except Exception as exc:
-        ps_bal_str = f"Lỗi kết nối ({exc})"
-
     dante_key = (settings.get("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
     dante_url = (settings.get("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
-    if not dante_key:
-        dante_bal_str = "Chưa cài API Key (Vào 📁 Kho Hàng -> 🔑 Key @DanteHubBot)"
-    else:
+
+    async def _get_ps() -> str:
+        try:
+            b_info = await ps_client.get_balance()
+            ps_usd = float(b_info.get("balance", 0.0))
+            ps_vnd = int(round(ps_usd * rate))
+            return f"{ps_vnd:,}đ (${ps_usd:.2f} | Hạng: {b_info.get('membership', 'bronze')})"
+        except Exception as exc:
+            return f"Lỗi kết nối ({exc})"
+
+    async def _get_dh() -> str:
+        if not dante_key:
+            return "Chưa cài API Key (Vào 📁 Kho Hàng -> 🔑 Key @DanteHubBot)"
         try:
             d_info = await ps_client.get_external_balance(dante_url, dante_key)
             d_usd = float(d_info.get("balance", 0.0) or 0.0)
             d_vnd = int(round(d_usd * rate))
-            dante_bal_str = f"{d_vnd:,}đ (${d_usd:.2f} {d_info.get('currency', 'USDT')} | Đã kết nối 🟢)"
+            return f"{d_vnd:,}đ (${d_usd:.2f} {d_info.get('currency', 'USDT')} | Đã kết nối 🟢)"
         except Exception as exc:
-            dante_bal_str = f"Lỗi kết nối ({exc})"
-    return ps_bal_str, dante_bal_str
+            return f"Lỗi kết nối ({exc})"
+
+    return await asyncio.gather(_get_ps(), _get_dh())
 
 
 async def render_admin_home(event: Any, force_new: bool = False) -> None:
