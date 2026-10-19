@@ -1504,16 +1504,21 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
             logger.debug("Lỗi đồng bộ sản phẩm định kỳ: %s", exc)
 
 
-# ==================== ADMIN PANEL (VNĐ) ====================
-async def render_admin_home(event: Any, force_new: bool = False) -> None:
-    uid = event.sender_id
-    if not is_admin(uid):
-        return
-    USER_AWAITING.pop(uid, None)
-    stats = db.get_summary_stats()
-    settings = db.get_all_settings()
-    rate = float(settings.get("vnd_rate", "25500") or 25500.0)
+# ==================== ADMIN PANEL (VNĐ - GIAO DIỆN GOM NHÓM THƯ MỤC GỌN ĐẸP) ====================
+SETTING_PARENT_FOLDER: dict[str, str] = {
+    "markup_percent": "pricing",
+    "min_profit_percent": "pricing",
+    "markup_fixed": "pricing",
+    "vnd_rate": "pricing",
+    "dante_api_key": "catalog",
+    "low_balance_threshold_usd": "catalog",
+    "deposit_bonus_tiers": "promos",
+    "sepay_api_token": "payment",
+    "methods_text": "users",
+}
 
+
+async def _fetch_admin_supplier_balances(settings: dict[str, str], rate: float) -> tuple[str, str]:
     ps_bal_str = "Đang kiểm tra..."
     try:
         b_info = await ps_client.get_balance()
@@ -1526,7 +1531,7 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     dante_key = (settings.get("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
     dante_url = (settings.get("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
     if not dante_key:
-        dante_bal_str = "Chưa cài API Key (Bấm 🔑 Key @DanteHubBot bên dưới)"
+        dante_bal_str = "Chưa cài API Key (Vào 📁 Kho Hàng -> 🔑 Key @DanteHubBot)"
     else:
         try:
             d_info = await ps_client.get_external_balance(dante_url, dante_key)
@@ -1535,127 +1540,249 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
             dante_bal_str = f"{d_vnd:,}đ (${d_usd:.2f} {d_info.get('currency', 'USDT')} | Đã kết nối 🟢)"
         except Exception as exc:
             dante_bal_str = f"Lỗi kết nối ({exc})"
+    return ps_bal_str, dante_bal_str
 
-    used_sp, limit_sp, can_sp = db.get_sepay_quota_status()
-    in_night = db.is_in_night_auto_window()
-    has_token = bool((settings.get("sepay_api_token", "") or os.getenv("SEPAY_API_TOKEN", "")).strip())
-    if not has_token:
-        sepay_status = "Chưa cài Token (Đang Duyệt Tay 24/7)"
-    elif used_sp >= limit_sp:
-        sepay_status = f"Đã hết {used_sp}/{limit_sp} lượt Free -> Đã chuyển về Duyệt Tay"
-    elif in_night:
-        sepay_status = f"🟢 Đang BẬT Tự Động Đêm ({used_sp}/{limit_sp} lượt Free)"
-    else:
-        sepay_status = f"☀️ Ban ngày: Duyệt Tay (Đêm 23h-06h sẽ Tự Động | Đã dùng {used_sp}/{limit_sp})"
 
-    bonus_on = str(settings.get("deposit_bonus_enabled", "1") or "0").strip() == "1"
-    tiers_raw = settings.get("deposit_bonus_tiers", "200000:5,500000:10")
-    bonus_status = f"🟢 Đang BẬT (`{tiers_raw}`)" if bonus_on else "🔴 Đang TẮT"
+async def render_admin_home(event: Any, force_new: bool = False) -> None:
+    uid = event.sender_id
+    if not is_admin(uid):
+        return
+    USER_AWAITING.pop(uid, None)
+    stats = db.get_summary_stats()
+    settings = db.get_all_settings()
+    rate = float(settings.get("vnd_rate", "25500") or 25500.0)
+    ps_bal_str, dante_bal_str = await _fetch_admin_supplier_balances(settings, rate)
 
-    restock_on = str(settings.get("restock_notify_enabled", "1") or "0").strip() == "1"
-    restock_status = "🟢 Đang BẬT" if restock_on else "🔴 Đang TẮT"
-    low_bal_usd = float(settings.get("low_balance_threshold_usd", "5.0") or 0.0)
-
-    autopost_on = str(settings.get("auto_post_enabled", "1") or "0").strip() == "1"
-    autopost_hours = settings.get("auto_post_hours", "9,14,20")
-    autopost_status = f"🟢 Đang BẬT (`{autopost_hours}h`)" if autopost_on else "🔴 Đang TẮT"
-
-    gift_on = str(settings.get("newbie_gift_enabled", "1") or "0").strip() == "1"
-    gift_vch = settings.get("newbie_gift_voucher", "TANTHU10")
-    gift_pts = settings.get("newbie_gift_points", "5")
-    gift_status = f"🟢 Đang BẬT (`+{gift_pts} điểm & {gift_vch}`)" if gift_on else "🔴 Đang TẮT"
-
-    social_on = str(settings.get("auto_social_proof_enabled", "1") or "0").strip() == "1"
-    social_status = "🟢 Đang BẬT" if social_on else "🔴 Đang TẮT"
-
-    remind_on = str(settings.get("deposit_reminder_enabled", "1") or "0").strip() == "1"
-    remind_status = "🟢 Đang BẬT (sau 10p)" if remind_on else "🔴 Đang TẮT"
-
-    fixed_val = vnd_int(settings.get("markup_fixed", "0"))
     min_profit_pct = float(settings.get("min_profit_percent", "150.0") or 150.0)
     active_src_cnt, total_backup_keys = db.get_backup_summary_stats()
     pending_cnt = stats.get("pending_deposits_count", 0)
+
     text = (
         "⚙️ **BẢNG ĐIỀU KHIỂN ADMIN (RESELLER PANEL)**\n\n"
         f"🏦 **Vốn Nguồn 1 (@ProdSellerBot):** `{ps_bal_str}`\n"
         f"🏦 **Vốn Nguồn 2 (@DanteHubBot):** `{dante_bal_str}`\n"
-        f"🔔 Cảnh báo sắp hết vốn: **Khi dưới `${low_bal_usd:.2f}`**\n"
         f"📦 **Kho dự phòng đa nguồn:** **{active_src_cnt} nguồn** đang bật (**{total_backup_keys} key** sẵn sàng)\n"
-        f"👥 Tổng khách hàng: **{stats['users_count']}** | 📦 Tổng đơn: **{stats['orders_count']}**\n"
-        f"⏳ Đơn nạp đang chờ duyệt: **{pending_cnt}**\n"
-        f"💰 Tổng doanh thu: **{vnd_int(stats['total_revenue']):,}đ**\n"
-        f"📉 Tổng giá vốn: **{vnd_int(stats['total_cost']):,}đ**\n"
-        f"💵 **Lợi nhuận ròng: +{vnd_int(stats['total_profit']):,}đ**\n\n"
-        "🔧 **Cấu hình Giá Bình Ổn Đa Nguồn & Phễu Tự Động:**\n"
-        f"• Tăng giá chuẩn (Markup %): **+{settings['markup_percent']}%** (+{fixed_val:,}đ) | Tỷ giá: **$1 = {int(rate):,}đ**\n"
-        f"• 🛡️ Sàn lãi tối thiểu (Khi bù hàng nguồn khác): **>= +{min_profit_pct:g}%** *(Giữ nguyên giá nếu lãi >= {min_profit_pct:g}%)*\n"
-        f"• ⏰ Tự động đăng bài Kênh theo giờ: **{autopost_status}**\n"
-        f"• 🎁 Phễu Quà Tân Thủ Join Kênh: **{gift_status}**\n"
-        f"• 🤖 Tạo hiệu ứng Đơn Mồi (Social Proof): **{social_status}**\n"
-        f"• 💡 Nhắc khách hoàn tất đơn nạp bỏ dở: **{remind_status}**\n"
-        f"• 🎁 Khuyến mãi nạp tiền: **{bonus_status}**\n"
-        f"• 📣 Tự động báo Hàng Về (Restock): **{restock_status}**\n"
-        f"• VietQR: **{settings['bank_id']} - {settings['bank_account_no']} ({settings['bank_account_name']})**\n"
-        f"• 🌙 SePay (23h-06h): **{sepay_status}**"
+        f"👥 Khách hàng: **{stats['users_count']}** | 📦 Tổng đơn: **{stats['orders_count']}** | ⏳ Chờ duyệt nạp: **{pending_cnt}**\n"
+        f"💰 Doanh thu: **{vnd_int(stats['total_revenue']):,}đ** | 📉 Giá vốn: **{vnd_int(stats['total_cost']):,}đ**\n"
+        f"💵 **Lợi nhuận ròng: +{vnd_int(stats['total_profit']):,}đ**\n"
+        f"🛡️ *Định giá: Chuẩn `+{settings['markup_percent']}%` | Sàn lãi `>={min_profit_pct:g}%` | Tỷ giá `$1 = {int(rate):,}đ`*\n\n"
+        "📂 **Chọn thư mục quản trị bên dưới:**"
     )
 
     rows = [
         [
-            Button.inline(f"⏳ Đơn nạp chờ duyệt ({pending_cnt})", b"adm:deplist", style="success" if pending_cnt > 0 else None),
+            Button.inline(
+                f"⏳ Đơn nạp chờ duyệt ({pending_cnt})",
+                b"adm:deplist",
+                style="success" if pending_cnt > 0 else None,
+            ),
             Button.inline("📦 10 Đơn gần nhất", b"adm:orders"),
         ],
         [
-            Button.inline("📢 Đăng Bảng Giá Kênh", b"adm:post_catalog", style="success"),
-            Button.inline("🔥 Đăng Bài SP Hot Ngay", b"adm:post_spotlight", style="primary"),
+            Button.inline("📁 Kho Hàng & Nguồn Cung", b"adm:dir:catalog", style="primary"),
+            Button.inline("📁 Cài Đặt Giá & Lãi", b"adm:dir:pricing", style="primary"),
         ],
         [
-            Button.inline("🏷️ Quản lý SP & Nguồn Hàng Dự Phòng", b"adm:plist:0", style="primary"),
-            Button.inline("🎟️ Quản lý Voucher", b"adm:vouchers", style="primary"),
+            Button.inline("📁 Kênh & Auto Đăng Bài", b"adm:dir:marketing", style="primary"),
+            Button.inline("📁 Voucher & KM Nạp", b"adm:dir:promos", style="primary"),
         ],
         [
-            Button.inline("🔄 Đồng Bộ @DanteHubBot", b"adm:dante_sync", style="success"),
-            Button.inline("🔑 Key @DanteHubBot", b"adm:set:dante_api_key"),
-        ],
-        [
-            Button.inline(f"📈 Markup Chuẩn (+{settings['markup_percent']}%)", b"adm:set:markup_percent"),
-            Button.inline(f"🛡️ Sàn Lãi Tối Thiểu (>={min_profit_pct:g}%)", b"adm:set:min_profit_percent"),
-        ],
-        [
-            Button.inline(f"⏰ {'Tắt' if autopost_on else 'Bật'} Auto Đăng Kênh", b"adm:tog_autopost"),
-            Button.inline(f"🎁 {'Tắt' if gift_on else 'Bật'} Quà Tân Thủ", b"adm:tog_gift"),
-        ],
-        [
-            Button.inline(f"🤖 {'Tắt' if social_on else 'Bật'} Đơn Mồi Kênh", b"adm:tog_social"),
-            Button.inline(f"💡 {'Tắt' if remind_on else 'Bật'} Nhắc Đơn Nạp", b"adm:tog_depremind"),
-        ],
-        [
-            Button.inline(f"🎁 {'Tắt' if bonus_on else 'Bật'} KM Nạp", b"adm:tog_bonus"),
-            Button.inline("⚙️ Chỉnh Mốc KM Nạp", b"adm:set:deposit_bonus_tiers"),
-        ],
-        [
-            Button.inline(f"📣 {'Tắt' if restock_on else 'Bật'} Báo Restock", b"adm:tog_restock"),
-            Button.inline("🔔 Mốc Báo Hết Vốn ($)", b"adm:set:low_balance_threshold_usd"),
-        ],
-        [
-            Button.inline("🔍 Tra cứu Khách hàng", b"adm:finduser"),
-            Button.inline("📣 Gửi thông báo (Broadcast)", b"adm:broadcast"),
-        ],
-        [
-            Button.inline("➕ Chỉnh +VNĐ Cố định", b"adm:set:markup_fixed"),
-            Button.inline("💱 Đổi Tỷ giá USD->VNĐ", b"adm:set:vnd_rate"),
-        ],
-        [
-            Button.inline("🏦 Cài Ngân hàng VietQR", b"adm:bank"),
-            Button.inline("🌙 Cài Token SePay (23h-06h)", b"adm:set:sepay_api_token"),
-        ],
-        [
-            Button.inline("💵 Cộng/Trừ tiền khách (VNĐ)", b"adm:addbal"),
-            Button.inline("🔄 Đồng bộ Kho ngay", b"adm:sync"),
+            Button.inline("📁 Ngân Hàng & SePay", b"adm:dir:payment", style="primary"),
+            Button.inline("📁 Quản Lý Khách Hàng", b"adm:dir:users", style="primary"),
         ],
         [
             Button.inline("« Về Menu Chính", b"menu:home"),
         ],
     ]
+    await send_or_edit(event, text, buttons=rows, force_new=force_new)
+
+
+async def render_admin_folder(event: Any, folder: str, force_new: bool = False) -> None:
+    uid = event.sender_id
+    if not is_admin(uid):
+        return
+    USER_AWAITING.pop(uid, None)
+    settings = db.get_all_settings()
+    rate = float(settings.get("vnd_rate", "25500") or 25500.0)
+    fixed_val = vnd_int(settings.get("markup_fixed", "0"))
+    min_profit_pct = float(settings.get("min_profit_percent", "150.0") or 150.0)
+
+    if folder == "catalog":
+        ps_bal_str, dante_bal_str = await _fetch_admin_supplier_balances(settings, rate)
+        active_src_cnt, total_backup_keys = db.get_backup_summary_stats()
+        low_bal_usd = float(settings.get("low_balance_threshold_usd", "5.0") or 0.0)
+        total_prods = len(ps_client._products_cache)
+        text = (
+            "📁 **THƯ MỤC: KHO HÀNG & NGUỒN CUNG CẤP**\n\n"
+            f"🛍️ Tổng sản phẩm trên Shop: **{total_prods} SP**\n"
+            f"🏦 **Vốn Nguồn 1 (@ProdSellerBot):** `{ps_bal_str}`\n"
+            f"🏦 **Vốn Nguồn 2 (@DanteHubBot):** `{dante_bal_str}`\n"
+            f"📦 **Kho dự phòng đa nguồn:** **{active_src_cnt} nguồn** đang bật (**{total_backup_keys} key** sẵn sàng)\n"
+            f"🔔 Cảnh báo sắp hết vốn: **Khi dưới `${low_bal_usd:.2f}`**"
+        )
+        rows = [
+            [Button.inline("🏷️ Quản lý SP & Nguồn Hàng Dự Phòng", b"adm:plist:0", style="primary")],
+            [
+                Button.inline("🔄 Đồng bộ Kho ngay", b"adm:sync", style="success"),
+                Button.inline("🔄 Đồng Bộ @DanteHubBot", b"adm:dante_sync", style="success"),
+            ],
+            [
+                Button.inline("🔑 Key @DanteHubBot", b"adm:set:dante_api_key"),
+                Button.inline("🔔 Mốc Báo Hết Vốn ($)", b"adm:set:low_balance_threshold_usd"),
+            ],
+            [Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")],
+        ]
+
+    elif folder == "pricing":
+        text = (
+            "📁 **THƯ MỤC: CÀI ĐẶT GIÁ BÁN & LỢI NHUẬN**\n\n"
+            f"• 📈 Tăng giá chuẩn (Markup %): **+{settings['markup_percent']}%**\n"
+            f"• 🛡️ Sàn lãi tối thiểu (Khi bù hàng nguồn phụ): **>= +{min_profit_pct:g}%** *(Giữ nguyên giá nếu lãi >= {min_profit_pct:g}%)*\n"
+            f"• ➕ Cộng thêm cố định mỗi SP: **+{fixed_val:,}đ**\n"
+            f"• 💱 Tỷ giá quy đổi USD -> VNĐ: **$1 = {int(rate):,}đ**"
+        )
+        rows = [
+            [
+                Button.inline(f"📈 Markup Chuẩn (+{settings['markup_percent']}%)", b"adm:set:markup_percent", style="primary"),
+                Button.inline(f"🛡️ Sàn Lãi Tối Thiểu (>={min_profit_pct:g}%)", b"adm:set:min_profit_percent", style="primary"),
+            ],
+            [
+                Button.inline("➕ Chỉnh +VNĐ Cố định", b"adm:set:markup_fixed"),
+                Button.inline("💱 Đổi Tỷ giá USD->VNĐ", b"adm:set:vnd_rate"),
+            ],
+            [Button.inline("🏷️ Đặt giá bán riêng từng Sản phẩm", b"adm:plist:0")],
+            [Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")],
+        ]
+
+    elif folder == "marketing":
+        autopost_on = str(settings.get("auto_post_enabled", "1") or "0").strip() == "1"
+        autopost_hours = settings.get("auto_post_hours", "9,14,20")
+        autopost_status = f"🟢 Đang BẬT (`{autopost_hours}h`)" if autopost_on else "🔴 Đang TẮT"
+
+        restock_on = str(settings.get("restock_notify_enabled", "1") or "0").strip() == "1"
+        restock_status = "🟢 Đang BẬT" if restock_on else "🔴 Đang TẮT"
+
+        social_on = str(settings.get("auto_social_proof_enabled", "1") or "0").strip() == "1"
+        social_status = "🟢 Đang BẬT" if social_on else "🔴 Đang TẮT"
+
+        gift_on = str(settings.get("newbie_gift_enabled", "1") or "0").strip() == "1"
+        gift_vch = settings.get("newbie_gift_voucher", "TANTHU10")
+        gift_pts = settings.get("newbie_gift_points", "5")
+        gift_status = f"🟢 Đang BẬT (`+{gift_pts} điểm & {gift_vch}`)" if gift_on else "🔴 Đang TẮT"
+        ch_name = settings.get("support_channel", "KingToolShopOfficial").lstrip("@")
+
+        text = (
+            "📁 **THƯ MỤC: KÊNH & TỰ ĐỘNG ĐĂNG BÀI**\n\n"
+            f"• 📣 Kênh liên kết: **@{ch_name}**\n"
+            f"• ⏰ Tự động đăng bài Kênh theo giờ: **{autopost_status}**\n"
+            f"• 📣 Tự động báo Hàng Về (Restock): **{restock_status}**\n"
+            f"• 🤖 Tạo hiệu ứng Đơn Mồi (Social Proof): **{social_status}**\n"
+            f"• 🎁 Phễu Quà Tân Thủ Join Kênh: **{gift_status}**"
+        )
+        rows = [
+            [
+                Button.inline("📢 Đăng Bảng Giá Kênh", b"adm:post_catalog", style="success"),
+                Button.inline("🔥 Đăng Bài SP Hot Ngay", b"adm:post_spotlight", style="primary"),
+            ],
+            [
+                Button.inline(f"⏰ {'Tắt' if autopost_on else 'Bật'} Auto Đăng Kênh", b"adm:tog_autopost"),
+                Button.inline(f"📣 {'Tắt' if restock_on else 'Bật'} Báo Restock", b"adm:tog_restock"),
+            ],
+            [
+                Button.inline(f"🤖 {'Tắt' if social_on else 'Bật'} Đơn Mồi Kênh", b"adm:tog_social"),
+                Button.inline(f"🎁 {'Tắt' if gift_on else 'Bật'} Quà Tân Thủ", b"adm:tog_gift"),
+            ],
+            [Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")],
+        ]
+
+    elif folder == "promos":
+        vouchers = db.get_all_vouchers()
+        bonus_on = str(settings.get("deposit_bonus_enabled", "1") or "0").strip() == "1"
+        tiers_raw = settings.get("deposit_bonus_tiers", "200000:5,500000:10")
+        bonus_status = f"🟢 Đang BẬT (`{tiers_raw}`)" if bonus_on else "🔴 Đang TẮT"
+
+        remind_on = str(settings.get("deposit_reminder_enabled", "1") or "0").strip() == "1"
+        remind_status = "🟢 Đang BẬT (sau 10p)" if remind_on else "🔴 Đang TẮT"
+
+        text = (
+            "📁 **THƯ MỤC: VOUCHER & KHUYẾN MÃI NẠP**\n\n"
+            f"• 🎟️ Tổng số mã Voucher: **{len(vouchers)} mã** *(Chốt chặn chống lỗ vốn `>= cost_vnd` tự động)*\n"
+            f"• 🎁 Khuyến mãi nạp tiền: **{bonus_status}**\n"
+            f"• 💡 Nhắc khách hoàn tất đơn nạp bỏ dở: **{remind_status}**"
+        )
+        rows = [
+            [
+                Button.inline("🎟️ Quản lý Voucher", b"adm:vouchers", style="primary"),
+                Button.inline("➕ Tạo Voucher Mới", b"adm:vch_add", style="success"),
+            ],
+            [
+                Button.inline(f"🎁 {'Tắt' if bonus_on else 'Bật'} KM Nạp", b"adm:tog_bonus"),
+                Button.inline("⚙️ Chỉnh Mốc KM Nạp", b"adm:set:deposit_bonus_tiers"),
+            ],
+            [
+                Button.inline(f"💡 {'Tắt' if remind_on else 'Bật'} Nhắc Đơn Nạp", b"adm:tog_depremind"),
+            ],
+            [Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")],
+        ]
+
+    elif folder == "payment":
+        stats = db.get_summary_stats()
+        pending_cnt = stats.get("pending_deposits_count", 0)
+        used_sp, limit_sp, _ = db.get_sepay_quota_status()
+        in_night = db.is_in_night_auto_window()
+        has_token = bool((settings.get("sepay_api_token", "") or os.getenv("SEPAY_API_TOKEN", "")).strip())
+        if not has_token:
+            sepay_status = "Chưa cài Token (Đang Duyệt Tay 24/7)"
+        elif used_sp >= limit_sp:
+            sepay_status = f"Đã hết {used_sp}/{limit_sp} lượt Free -> Đã chuyển về Duyệt Tay"
+        elif in_night:
+            sepay_status = f"🟢 Đang BẬT Tự Động Đêm ({used_sp}/{limit_sp} lượt Free)"
+        else:
+            sepay_status = f"☀️ Ban ngày: Duyệt Tay (Đêm 23h-06h sẽ Tự Động | Đã dùng {used_sp}/{limit_sp})"
+
+        text = (
+            "📁 **THƯ MỤC: NGÂN HÀNG VIETQR & SEPAY**\n\n"
+            f"• 🏦 Ngân hàng VietQR: **{settings['bank_id']} - {settings['bank_account_no']} ({settings['bank_account_name']})**\n"
+            f"• 🌙 SePay (23h-06h): **{sepay_status}**\n"
+            f"• ⏳ Đơn nạp đang chờ duyệt: **{pending_cnt} đơn**"
+        )
+        rows = [
+            [
+                Button.inline(
+                    f"⏳ Đơn nạp chờ duyệt ({pending_cnt})",
+                    b"adm:deplist",
+                    style="success" if pending_cnt > 0 else "primary",
+                )
+            ],
+            [
+                Button.inline("🏦 Cài Ngân hàng VietQR", b"adm:bank"),
+                Button.inline("🌙 Cài Token SePay (23h-06h)", b"adm:set:sepay_api_token"),
+            ],
+            [Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")],
+        ]
+
+    else:  # "users"
+        stats = db.get_summary_stats()
+        adm_user = settings.get("support_admin", "KingToolShopSupport").lstrip("@")
+        text = (
+            "📁 **THƯ MỤC: QUẢN LÝ KHÁCH HÀNG & THÔNG BÁO**\n\n"
+            f"• 👥 Tổng khách hàng: **{stats['users_count']} khách**\n"
+            f"• 📦 Tổng đơn hàng: **{stats['orders_count']} đơn**\n"
+            f"• 🆘 Tài khoản CSKH: **@{adm_user}**"
+        )
+        rows = [
+            [
+                Button.inline("🔍 Tra cứu Khách hàng", b"adm:finduser", style="primary"),
+                Button.inline("💵 Cộng/Trừ tiền khách (VNĐ)", b"adm:addbal", style="success"),
+            ],
+            [
+                Button.inline("📣 Gửi thông báo (Broadcast)", b"adm:broadcast", style="primary"),
+                Button.inline("📦 10 Đơn gần nhất", b"adm:orders"),
+            ],
+            [Button.inline("📖 Sửa bài Hướng dẫn (Methods)", b"adm:set:methods_text")],
+            [Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")],
+        ]
+
     await send_or_edit(event, text, buttons=rows, force_new=force_new)
 
 
@@ -1699,7 +1826,10 @@ async def render_admin_vouchers(event: Any, force_new: bool = False) -> None:
                 ),
             ])
         text = "\n".join(lines)
-    rows.append([Button.inline("« Về Bảng Admin", b"adm:home")])
+    rows.append([
+        Button.inline("« Về Thư mục Voucher & KM", b"adm:dir:promos"),
+        Button.inline("⚙️ Bảng Admin", b"adm:home"),
+    ])
     await send_or_edit(event, text, buttons=rows, force_new=force_new)
 
 
@@ -1721,7 +1851,10 @@ async def render_admin_pending_deposits(event: Any) -> None:
                 Button.inline(f"❌ Từ chối #{d['id']}", f"adm:dep_no:{d['id']}".encode(), style="danger"),
             ])
         text = "\n".join(lines)
-    rows.append([Button.inline("« Về Bảng Admin", b"adm:home")])
+    rows.append([
+        Button.inline("📁 Ngân Hàng & SePay", b"adm:dir:payment"),
+        Button.inline("« Về Bảng Admin", b"adm:home"),
+    ])
     await send_or_edit(event, text, buttons=rows)
 
 
@@ -1772,7 +1905,10 @@ async def render_admin_product_list(event: Any, page: int = 0) -> None:
         nav.append(Button.inline("Trang sau ➡️", f"adm:plist:{page + 1}".encode()))
     if nav:
         rows.append(nav)
-    rows.append([Button.inline("« Về Bảng Admin", b"adm:home")])
+    rows.append([
+        Button.inline("« Về Thư mục Kho Hàng", b"adm:dir:catalog"),
+        Button.inline("⚙️ Bảng Admin", b"adm:home"),
+    ])
 
     await send_or_edit(
         event,
@@ -2631,12 +2767,18 @@ async def run_bot() -> None:
                 await render_admin_home(event)
                 return
 
+            if data.startswith("adm:dir:"):
+                await event.answer()
+                folder_name = data.split(":", 2)[2]
+                await render_admin_folder(event, folder_name)
+                return
+
             if data == "adm:tog_bonus":
                 cur = str(db.get_setting("deposit_bonus_enabled", "1") or "0").strip() == "1"
                 new_val = "0" if cur else "1"
                 db.set_setting("deposit_bonus_enabled", new_val)
                 await event.answer("🟢 Đã BẬT Khuyến mãi nạp tiền!" if new_val == "1" else "🔴 Đã TẮT Khuyến mãi nạp tiền!")
-                await render_admin_home(event)
+                await render_admin_folder(event, "promos")
                 return
 
             if data == "adm:tog_restock":
@@ -2644,7 +2786,7 @@ async def run_bot() -> None:
                 new_val = "0" if cur else "1"
                 db.set_setting("restock_notify_enabled", new_val)
                 await event.answer("🟢 Đã BẬT tự động báo Restock lên Kênh!" if new_val == "1" else "🔴 Đã TẮT tự động báo Restock!")
-                await render_admin_home(event)
+                await render_admin_folder(event, "marketing")
                 return
 
             if data == "adm:tog_autopost":
@@ -2654,7 +2796,7 @@ async def run_bot() -> None:
                 await event.answer(
                     "🟢 Đã BẬT tự động đăng bài Kênh theo khung giờ!" if new_val == "1" else "🔴 Đã TẮT tự động đăng bài Kênh!"
                 )
-                await render_admin_home(event)
+                await render_admin_folder(event, "marketing")
                 return
 
             if data == "adm:tog_gift":
@@ -2664,7 +2806,7 @@ async def run_bot() -> None:
                 await event.answer(
                     "🟢 Đã BẬT Phễu Quà Tân Thủ Join Kênh!" if new_val == "1" else "🔴 Đã TẮT Phễu Quà Tân Thủ!"
                 )
-                await render_admin_home(event)
+                await render_admin_folder(event, "marketing")
                 return
 
             if data == "adm:tog_social":
@@ -2674,7 +2816,7 @@ async def run_bot() -> None:
                 await event.answer(
                     "🟢 Đã BẬT tạo hiệu ứng Đơn Mồi (Social Proof) trên Kênh!" if new_val == "1" else "🔴 Đã TẮT Đơn Mồi!"
                 )
-                await render_admin_home(event)
+                await render_admin_folder(event, "marketing")
                 return
 
             if data == "adm:tog_depremind":
@@ -2684,7 +2826,7 @@ async def run_bot() -> None:
                 await event.answer(
                     "🟢 Đã BẬT tự động nhắc khách hoàn tất đơn nạp bỏ dở!" if new_val == "1" else "🔴 Đã TẮT nhắc đơn nạp!"
                 )
-                await render_admin_home(event)
+                await render_admin_folder(event, "promos")
                 return
 
             if data.startswith("adm:warr_reply:"):
@@ -2764,7 +2906,7 @@ async def run_bot() -> None:
                 await send_or_edit(
                     event,
                     "🔍 **TRA CỨU KHÁCH HÀNG**\n\nNhập `Telegram ID` hoặc `@username` của khách hàng cần kiểm tra:",
-                    buttons=[[Button.inline("« Hủy", b"adm:home")]],
+                    buttons=[[Button.inline("« Hủy", b"adm:dir:users")]],
                 )
                 return
 
@@ -2774,7 +2916,7 @@ async def run_bot() -> None:
                 await send_or_edit(
                     event,
                     "📣 **GỬI THÔNG BÁO TOÀN BỘ KHÁCH HÀNG (BROADCAST)**\n\nNhập nội dung tin nhắn bạn muốn gửi tới toàn bộ khách đã từng dùng Bot:",
-                    buttons=[[Button.inline("« Hủy", b"adm:home")]],
+                    buttons=[[Button.inline("« Hủy", b"adm:dir:users")]],
                 )
                 return
 
@@ -2784,13 +2926,18 @@ async def run_bot() -> None:
                     msg_id = await post_catalog_to_channel(client, pin=True, delete_old=True)
                     await event.respond(
                         f"✅ Đã đăng và ghim **Bảng giá & Tồn kho tự động** lên kênh `@KingToolShopOfficial` (Msg `#{msg_id}`, tự động xóa bài cũ)!",
-                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                        buttons=[
+                            [
+                                Button.inline("« Về Thư mục Kênh & Marketing", b"adm:dir:marketing"),
+                                Button.inline("⚙️ Bảng Admin", b"adm:home"),
+                            ]
+                        ],
                     )
                 except Exception as exc:
                     await event.respond(
                         f"❌ Không thể đăng lên kênh `@KingToolShopOfficial`: `{exc}`\n"
                         "*(Hãy đảm bảo @KingToolShop_bot đã được cấp quyền Admin trong kênh!)*",
-                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                        buttons=[[Button.inline("« Về Thư mục Kênh & Marketing", b"adm:dir:marketing")]],
                     )
                 return
 
@@ -2801,12 +2948,17 @@ async def run_bot() -> None:
                     await post_simulated_social_proof(client)
                     await event.respond(
                         f"🔥 Đã đăng bài **Spotlight Sản Phẩm Hot** (Msg `#{sp_mid}`) & **Thông báo Đơn hàng hoàn tất** lên `@KingToolShopOfficial` thành công!",
-                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                        buttons=[
+                            [
+                                Button.inline("« Về Thư mục Kênh & Marketing", b"adm:dir:marketing"),
+                                Button.inline("⚙️ Bảng Admin", b"adm:home"),
+                            ]
+                        ],
                     )
                 except Exception as exc:
                     await event.respond(
                         f"❌ Không thể đăng bài lên kênh `@KingToolShopOfficial`: `{exc}`",
-                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                        buttons=[[Button.inline("« Về Thư mục Kênh & Marketing", b"adm:dir:marketing")]],
                     )
                 return
 
@@ -2820,7 +2972,7 @@ async def run_bot() -> None:
                     except Exception:
                         pass
                 await ps_client.sync_products(force=True)
-                await render_admin_home(event)
+                await render_admin_folder(event, "catalog")
                 return
 
             if data == "adm:dante_sync":
@@ -2842,12 +2994,17 @@ async def run_bot() -> None:
                         f"  • Sản phẩm độc quyền từ `@DanteHubBot`: **`{dh_excl} SP`** *(Lấy trực tiếp sang bán với Markup chuẩn `+{db.get_setting('markup_percent', '200')}%`)*\n"
                         f"🟢 Nguồn dự phòng `@DanteHubBot` đang sẵn hàng: **`{res['in_stock']} SP`**\n"
                         f"🛡️ Mọi sản phẩm đều tự động áp dụng **Bình ổn giá (Khóa sàn lãi `>= +{db.get_setting('min_profit_percent', '150')}%`)**!",
-                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                        buttons=[
+                            [
+                                Button.inline("« Về Thư mục Kho Hàng", b"adm:dir:catalog"),
+                                Button.inline("⚙️ Bảng Admin", b"adm:home"),
+                            ]
+                        ],
                     )
                 except Exception as exc:
                     await event.respond(
                         f"❌ Lỗi đồng bộ `@DanteHubBot`: `{exc}`",
-                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                        buttons=[[Button.inline("« Về Thư mục Kho Hàng", b"adm:dir:catalog")]],
                     )
                 return
 
@@ -2999,6 +3156,8 @@ async def run_bot() -> None:
             if data.startswith("adm:set:"):
                 await event.answer()
                 setting_key = data.split(":")[2]
+                parent_folder = SETTING_PARENT_FOLDER.get(setting_key, "")
+                cancel_cb = f"adm:dir:{parent_folder}".encode() if parent_folder else b"adm:home"
                 prompts = {
                     "markup_percent": (
                         "📈 **CHỈNH % LỢI NHUẬN MỤC TIÊU (MARKUP CHUẨN)**\n\n"
@@ -3039,7 +3198,7 @@ async def run_bot() -> None:
                 await send_or_edit(
                     event,
                     prompts.get(setting_key, f"Nhập giá trị mới cho `{setting_key}`:"),
-                    buttons=[[Button.inline("« Hủy", b"adm:home")]],
+                    buttons=[[Button.inline("« Hủy", cancel_cb)]],
                 )
                 return
 
@@ -3056,7 +3215,7 @@ async def run_bot() -> None:
                         "`MB | 0987654321 | NGUYEN VAN A`\n"
                         "*(Mã ngân hàng phổ biến: MB, VCB, TCB, ACB, BIDV, ICB, VPB, TPB)*"
                     ),
-                    buttons=[[Button.inline("« Hủy", b"adm:home")]],
+                    buttons=[[Button.inline("« Hủy", b"adm:dir:payment")]],
                 )
                 return
 
@@ -3071,7 +3230,7 @@ async def run_bot() -> None:
                         "Ví dụ cộng 50,000đ: `8110826820 50000` (hoặc `8110826820 50k`)\n"
                         "Ví dụ trừ 20,000đ: `8110826820 -20000`"
                     ),
-                    buttons=[[Button.inline("« Hủy", b"adm:home")]],
+                    buttons=[[Button.inline("« Hủy", b"adm:dir:users")]],
                 )
                 return
 
@@ -3478,7 +3637,12 @@ async def run_bot() -> None:
             if not found:
                 await event.respond(
                     f"❌ Không tìm thấy khách hàng nào khớp với `{text}`.",
-                    buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    buttons=[
+                        [
+                            Button.inline("« Về Thư mục Khách Hàng", b"adm:dir:users"),
+                            Button.inline("⚙️ Bảng Admin", b"adm:home"),
+                        ]
+                    ],
                 )
                 return
             f_uid = found["telegram_id"]
@@ -3502,7 +3666,10 @@ async def run_bot() -> None:
                 info_txt,
                 buttons=[
                     [Button.inline("💵 Cộng/Trừ số dư khách này", b"adm:addbal", style="primary")],
-                    [Button.inline("« Về Bảng Admin", b"adm:home")],
+                    [
+                        Button.inline("« Về Thư mục Khách Hàng", b"adm:dir:users"),
+                        Button.inline("⚙️ Bảng Admin", b"adm:home"),
+                    ],
                 ],
             )
             return
@@ -3521,7 +3688,12 @@ async def run_bot() -> None:
                     pass
             await status_m.edit(
                 f"✅ Đã gửi thông báo thành công tới **{sent_ok}/{len(user_ids)}** khách hàng!",
-                buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                buttons=[
+                    [
+                        Button.inline("« Về Thư mục Khách Hàng", b"adm:dir:users"),
+                        Button.inline("⚙️ Bảng Admin", b"adm:home"),
+                    ]
+                ],
             )
             return
 
@@ -3562,7 +3734,11 @@ async def run_bot() -> None:
                         pass
             USER_AWAITING.pop(uid, None)
             await event.respond(f"✅ Đã cập nhật `{key}` thành công!")
-            await render_admin_home(event, force_new=True)
+            parent_folder = SETTING_PARENT_FOLDER.get(key)
+            if parent_folder:
+                await render_admin_folder(event, parent_folder, force_new=True)
+            else:
+                await render_admin_home(event, force_new=True)
             return
 
         if atype == "set_bank":
@@ -3575,7 +3751,7 @@ async def run_bot() -> None:
             db.set_setting("bank_account_name", parts[2].upper())
             USER_AWAITING.pop(uid, None)
             await event.respond("✅ Đã cập nhật thông tin Ngân hàng VietQR!")
-            await render_admin_home(event, force_new=True)
+            await render_admin_folder(event, "payment", force_new=True)
             return
 
         if atype == "admin_addbal":
@@ -3600,7 +3776,7 @@ async def run_bot() -> None:
                 )
             except Exception:
                 pass
-            await render_admin_home(event, force_new=True)
+            await render_admin_folder(event, "users", force_new=True)
             return
 
     await client.run_until_disconnected()

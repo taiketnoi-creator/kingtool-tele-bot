@@ -5,6 +5,24 @@
 
 ---
 
+## [v2.9.2] - 2026-10-19: Tối Ưu Giao Diện Quản Trị `/admin` Dạng Thư Mục (6 Folder Chức Năng Gọn Đẹp, Không Rối Mắt)
+
+### 📂 Gom Nhóm 26 Nút Cài Đặt Admin Vào 6 Thư Mục Chức Năng (`bot.py`)
+- **Màn hình chính `/admin` (`render_admin_home`):**
+  - Rút gọn từ 14 hàng (27 nút rời rạc) xuống còn **5 hàng gọn đẹp**:
+    - Hàng thao tác nhanh trên cùng: `⏳ Đơn nạp chờ duyệt` | `📦 10 Đơn gần nhất`.
+    - **6 Thư mục quản trị chuyên biệt (`adm:dir:<folder>`):**
+      1. `📁 Kho Hàng & Nguồn Cung` (`adm:dir:catalog`): Quản lý 143 SP & Nguồn dự phòng, Đồng bộ Kho chính, Đồng bộ `@DanteHubBot`, Cài API Key `@DanteHubBot`, Mốc cảnh báo hết vốn (`$`).
+      2. `📁 Cài Đặt Giá & Lãi` (`adm:dir:pricing`): Markup chuẩn (`+200%`), Sàn lãi tối thiểu (`>=150%`), Cộng `+VNĐ` cố định, Đổi tỷ giá `USD -> VNĐ`, Đặt giá riêng từng SP.
+      3. `📁 Kênh & Auto Đăng Bài` (`adm:dir:marketing`): Đăng Bảng Giá Kênh ngay, Đăng Bài SP Hot ngay, Bật/Tắt Auto Đăng Kênh (`9h,14h,20h`), Bật/Tắt Báo Restock, Bật/Tắt Đơn Mồi Kênh, Bật/Tắt Quà Tân Thủ.
+      4. `📁 Voucher & KM Nạp` (`adm:dir:promos`): Quản lý Voucher, Tạo Voucher nhanh 5s, Bật/Tắt KM Nạp, Chỉnh Mốc KM Nạp, Bật/Tắt Nhắc đơn nạp bỏ dở.
+      5. `📁 Ngân Hàng & SePay` (`adm:dir:payment`): Duyệt đơn nạp chờ, Cài Ngân hàng VietQR, Cài Token SePay tự động ban đêm (`23h-06h`).
+      6. `📁 Quản Lý Khách Hàng` (`adm:dir:users`): Tra cứu Khách hàng, Cộng/Trừ tiền khách (VNĐ), Gửi thông báo toàn hệ thống (Broadcast), 10 Đơn gần nhất, Sửa bài Hướng dẫn (Methods).
+- **Trải nghiệm mượt mà trong từng Thư mục (`render_admin_folder` & `SETTING_PARENT_FOLDER`):**
+  - Khi bấm Bật/Tắt hoặc chỉnh sửa bất kỳ thông số nào bên trong thư mục, hệ thống tự động cập nhật và giữ nguyên màn hình tại thư mục đó (không bị văng ngược ra ngoài màn hình chính).
+
+---
+
 ## [v2.9.1] - 2026-10-19: Giao Diện Lưới Thương Hiệu 2–3 Cột (Brand Grid UI) — Chỉ Hiển Thị `Icon + Tên Sản Phẩm`, Giá Bán Hiển Thị Khi Xem Chi Tiết
 
 ### 🎨 1. Bảng Lưới Thương Hiệu 2–3 Cột Chuẩn Mực (`prodseller_client.py` & `bot.py`)
