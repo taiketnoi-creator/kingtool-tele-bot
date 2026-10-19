@@ -5,6 +5,28 @@
 
 ---
 
+## [v2.8.0] - 2026-10-19: Tích Hợp Trực Tiếp Nguồn Hàng Thứ 2 `@DanteHubBot` (DanteHub Partner API v1) & Đấu Nối Tự Động 17 Sản Phẩm Dự Phòng
+
+### 🔌 1. Tích hợp Native `@DanteHubBot` Partner API v1 (`prodseller_client.py` & `database.py`)
+- **Kết nối trực tiếp cổng API `@DanteHubBot` (`https://dantehub.shop/api/public/v1`):**
+  - Lưu trữ `dante_api_key` (`dh_live_...`) và `dante_base_url` trong bảng `telebot.settings` trên Supabase PostgreSQL.
+  - Bổ sung bộ phương thức chuyên biệt trong `ProdSellerClient`:
+    - `get_external_balance()`: Kiểm tra số dư ví USDT trực tiếp trên `@DanteHubBot` (`GET /balance`).
+    - `fetch_dantehub_catalog()`: Đồng bộ toàn bộ 124 sản phẩm từ `@DanteHubBot` (`GET /products`) chỉ bằng **1 request HTTP duy nhất** (kèm RAM Cache 60s), chuẩn hóa trường `title` và `in_stock` (boolean).
+    - `create_external_api_order()` & `get_external_api_order_status()`: Hỗ trợ đặt hàng tự động chuẩn DanteHub (`POST /orders` với `{"product_id", "qty", "ref"}` chống trùng lặp), tự động chờ nhanh 2 nhịp (`1.5s + 2.0s`) để lấy `delivery` ngay nếu đơn ở trạng thái `processing`, đồng thời tích hợp vào vòng lặp `poll_pending_activations_loop()` (`bot.py`) để tự động gửi Key cho khách ngay khi đơn `EXT_<sid>_<order_id>` chuyển sang `delivered` (hoặc tự động hoàn tiền VNĐ nếu đơn bị `cancelled`).
+- **Làm tròn lên tuyệt đối cho Khóa Sàn Lợi Nhuận (`_round_ceil_nice_vnd` trong `database.py`):**
+  - Đảm bảo khi nâng giá theo sàn lợi nhuận tối thiểu (`min_profit_percent = 150%`), hệ thống luôn làm tròn lên (`math.ceil`) tới hàng nghìn VNĐ, cam kết tỷ suất lợi nhuận thực tế luôn đạt **`>= 150.0%`** (không bao giờ bị làm tròn xuống `149%`).
+
+### 🔗 2. Tự động đấu nối 17 Sản Phẩm Dự Phòng & Gắn Nhanh 1 Chạm trong `/admin` (`bot.py`)
+- **Đấu nối sẵn 17 sản phẩm tương đương (`DEFAULT_DANTE_MAPPINGS` & `sync_all_dante_backups`):**
+  - Tự động liên kết 17 sản phẩm trùng khớp giữa `@ProdSellerBot` và `@DanteHubBot` (Adobe Express 12M, Office 365 1Y, Duolingo Super 12M, Gemini Pro 18M, Muse AI 1B, Scribd 1M, Canva Pro, Notion Plus 12M, YouTube Premium 1M, CapCut Pro 1M, CapCut Pro 1600 Credits, ElevenLabs Credit, Wispr Flow 12M, Figma Pro Edu 2Y, JetBrains Edu 12M, Canva Admin 500, ChatGPT Plus K12 Edu 2Y).
+  - Các mặt hàng đang hết kho bên `@ProdSellerBot` (`Canva Pro`, `ElevenLabs Credit`, `ChatGPT Plus K12 Edu`) lập tức được mở bán trở lại nhờ nguồn dự phòng `@DanteHubBot`.
+- **Quản trị `@DanteHubBot` trên `/admin`:**
+  - Hiển thị trực tiếp số dư ví **`🏦 Vốn Nguồn 2 (@DanteHubBot)`** ngay dưới số dư `@ProdSellerBot`.
+  - Bổ sung nút **`🔄 Đồng Bộ @DanteHubBot`** (`adm:dante_sync`), **`🔑 Key @DanteHubBot`** (`adm:set:dante_api_key`), và nút **`⚡ Gắn Nhanh Từ @DanteHubBot (1 Chạm)`** (`adm:bsrc_dante:<pid>`) trong từng sản phẩm để Admin chọn gắn bất kỳ sản phẩm nào từ kho 124 SP của `@DanteHubBot` mà không cần gõ tay.
+
+---
+
 ## [v2.7.0] - 2026-10-19: Hệ Thống Đa Nguồn Hàng Dự Phòng Tự Động (Multi-Source Failover) & Bình Ổn Giá Thông Minh (Khóa Sàn Lãi `>= 150%`)
 
 ### 📦 1. Cơ chế Đa Nguồn Hàng Tự Động Bù Kho (`telebot.backup_sources`)

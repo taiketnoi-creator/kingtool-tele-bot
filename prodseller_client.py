@@ -4,12 +4,35 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import re
 import time
 from typing import Any
 
 import httpx
 
 BASE_URL = "https://prodseller.com/v1"
+DANTE_BASE_URL = "https://dantehub.shop/api/public/v1"
+
+# Danh sách 17 sản phẩm tương đương giữa @ProdSellerBot (product_id) và @DanteHubBot (remote_product_id)
+DEFAULT_DANTE_MAPPINGS: list[tuple[str, str, str]] = [
+    ("6a5b873847b606c66fc160b2", "be463cf1-d374-4765-81e7-205fa7ded577", "DanteHub"),  # Adobe Express 12M
+    ("6a2fe23a1c8697b163aedcbd", "29f62cae-b550-4047-811e-548373cba029", "DanteHub"),  # Microsoft Office 365 Plus 1Y
+    ("6a31035939dc014325da2c66", "a2076639-732f-4366-87c0-cecee34b35a4", "DanteHub"),  # Gemini Pro 18 Months
+    ("6aa5bafb77c587d75cbe2a8e", "def676c9-a1c5-4aea-ad6f-224b4337a71f", "DanteHub"),  # Duolingo Super 12M
+    ("6ac65a53d07e0053469f477d", "00a35204-8b71-4543-bee7-c0525b3cad4b", "DanteHub"),  # Muse AI 1B Tokens
+    ("6ac88922cd35776c4d2cf283", "3c20bc64-c09b-4664-9013-e33efb96c207", "DanteHub"),  # SCRIBD PREMIUM 1M FW
+    ("6ad1e30eb2ca69ae7f674aff", "15d553d9-3d8e-4355-9a2a-f8e6693da3bf", "DanteHub"),  # YouTube Premium 1M
+    ("6a2fda51035a6d898f2106fe", "23e46b24-0639-47b6-bc76-e9e592bc2a8e", "DanteHub"),  # CapCut Pro 1 Month FW
+    ("6aa4551bc76bc3aeb2ebe88e", "59467b31-53b4-43de-b8d4-4c00b6088c1f", "DanteHub"),  # CAPCUT PRO 1600 CREDITS
+    ("6abeb3210dbb401865ffe95f", "6bce5a91-b1df-4165-9c98-bb06654ad90b", "DanteHub"),  # Wispr Flow 12M Edu
+    ("6a7826d9cf6984bb8ba101e8", "23aca303-4729-4f5f-be65-cbf44768819a", "DanteHub"),  # Figma Pro Edu 2yrs
+    ("6a88be06fb032a73212a202b", "b4905436-e389-4c19-86b6-17a429120f3f", "DanteHub"),  # JetBrains Edu Pack 12m
+    ("6a54b931351561c645a43e8c", "8bc2c2d1-75be-4d23-abf0-f11f1b7589f6", "DanteHub"),  # Notion Plus 12M
+    ("6a2fdb4f035a6d898f2106ff", "19ba7788-f159-49c5-b07b-89bce8383b9e", "DanteHub"),  # Canva Pro Admin 500 invites
+    ("6acf6cf6a8f487d336acb4ab", "97c3d979-e770-42e9-93a2-0a332123ea94", "DanteHub"),  # ElevenLabs 100K Credit
+    ("6a495a5f02999800df961920", "4212e10e-6369-41c7-814b-778ce82a6efc", "DanteHub"),  # ChatGPT Plus K12 Edu 24M
+    ("6a316a7b1777fc2347835653", "5003b154-9d14-432e-a232-e3d2be2d18e1", "DanteHub"),  # Canva Pro Team Edu 3Y
+]
 
 # Custom Emoji Icon IDs + Unicode Icons cho từng nhóm và từng sản phẩm
 GROUP_ICONS: dict[str, int] = {
@@ -110,6 +133,8 @@ class ProdSellerClient:
         self._last_sync: float = 0.0
         self._lock = asyncio.Lock()
         self._http: httpx.AsyncClient | None = None
+        self._dante_products_cache: list[dict[str, Any]] = []
+        self._dante_last_sync: float = 0.0
 
     def _get_http(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
@@ -129,11 +154,103 @@ class ProdSellerClient:
             h["Idempotency-Key"] = idempotency_key[:100]
         return h
 
+    @staticmethod
+    def is_dantehub_url(api_base_url: str) -> bool:
+        low = (api_base_url or "").lower()
+        return "dantehub" in low or "/api/public" in low
+
+    @staticmethod
+    def _normalize_external_base(api_base_url: str) -> str:
+        base = (api_base_url or DANTE_BASE_URL).strip().rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        return base
+
+    @staticmethod
+    def _external_headers(api_key: str, idempotency_key: str | None = None) -> dict[str, str]:
+        clean_key = (api_key or "").strip()
+        h = {
+            "X-API-Key": clean_key,
+            "Authorization": f"Bearer {clean_key}",
+            "Content-Type": "application/json",
+            "User-Agent": "KingToolMultiSourceRouter/1.0",
+        }
+        if idempotency_key:
+            h["Idempotency-Key"] = idempotency_key[:100]
+        return h
+
     async def get_balance(self) -> dict[str, Any]:
         client = self._get_http()
         resp = await client.get(f"{BASE_URL}/balance", headers=self._headers())
         resp.raise_for_status()
         return resp.json()
+
+    async def get_external_balance(
+        self,
+        api_base_url: str = DANTE_BASE_URL,
+        api_key: str = "",
+    ) -> dict[str, Any]:
+        """Lấy số dư ví USDT trên @DanteHubBot hoặc cổng Reseller API ngoài."""
+        base = self._normalize_external_base(api_base_url)
+        client = self._get_http()
+        resp = await client.get(
+            f"{base}/balance",
+            headers=self._external_headers(api_key),
+            timeout=12.0,
+        )
+        resp.raise_for_status()
+        return resp.json()
+
+    async def fetch_dantehub_catalog(
+        self,
+        api_base_url: str = DANTE_BASE_URL,
+        api_key: str = "",
+        force: bool = False,
+        cache_ttl: float = 60.0,
+    ) -> list[dict[str, Any]]:
+        """Lấy toàn bộ danh mục 124+ sản phẩm từ @DanteHubBot (có RAM Cache 60s)."""
+        now = time.time()
+        if not force and self._dante_products_cache and (now - self._dante_last_sync < cache_ttl):
+            return self._dante_products_cache
+        base = self._normalize_external_base(api_base_url)
+        client = self._get_http()
+        resp = await client.get(
+            f"{base}/products",
+            headers=self._external_headers(api_key),
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        prods = data.get("products", []) if isinstance(data, dict) else []
+        if prods:
+            self._dante_products_cache = prods
+            self._dante_last_sync = now
+        return self._dante_products_cache
+
+    async def search_dantehub_products(
+        self,
+        query: str,
+        api_base_url: str = DANTE_BASE_URL,
+        api_key: str = "",
+        limit: int = 8,
+    ) -> list[dict[str, Any]]:
+        """Tìm nhanh các sản phẩm tương đồng trên @DanteHubBot để Admin gắn 1 chạm."""
+        catalog = await self.fetch_dantehub_catalog(api_base_url, api_key, force=False)
+        tokens = [
+            w
+            for w in re.split(r"[^a-z0-9]+", (query or "").lower())
+            if len(w) >= 2 and w not in ("pro", "plus", "fw", "nw", "month", "months", "year", "years", "account", "link", "edu")
+        ]
+        scored: list[tuple[int, float, dict[str, Any]]] = []
+        for item in catalog:
+            title = str(item.get("title") or item.get("name") or "")
+            cat = str(item.get("category") or "")
+            hay = f"{cat} {title}".lower()
+            score = sum(3 if tok in cat.lower() else (2 if tok in hay else 0) for tok in tokens)
+            if score > 0 or not tokens:
+                scored.append((score, -float(item.get("price", 0) or 0), item))
+        scored.sort(key=lambda x: (x[0], x[1]), reverse=True)
+        return [x[2] for x in scored[:limit]]
 
     async def fetch_product_detail(self, product_id: str) -> dict[str, Any]:
         client = self._get_http()
@@ -258,20 +375,108 @@ class ProdSellerClient:
         api_base_url: str,
         api_key: str,
         remote_product_id: str,
+        force_refresh: bool = False,
     ) -> dict[str, Any]:
-        """Lấy tồn kho và giá từ cổng Reseller API v1 của nguồn dự phòng bên ngoài."""
-        base = api_base_url.strip().rstrip("/")
-        if not base.endswith("/v1"):
-            base = f"{base}/v1"
+        """Lấy tồn kho và giá từ @DanteHubBot hoặc cổng Reseller API v1 bên ngoài."""
+        base = self._normalize_external_base(api_base_url)
+        r_pid = remote_product_id.strip()
+
+        if self.is_dantehub_url(base):
+            catalog = await self.fetch_dantehub_catalog(base, api_key, force=force_refresh)
+            for item in catalog:
+                if str(item.get("id", "")).strip() == r_pid:
+                    in_st = bool(item.get("in_stock", item.get("inStock", False)))
+                    raw_st = item.get("stock")
+                    st_val = int(raw_st) if raw_st is not None else (50 if in_st else 0)
+                    return {
+                        "id": r_pid,
+                        "name": str(item.get("title") or item.get("name") or r_pid),
+                        "category": str(item.get("category") or ""),
+                        "price": float(item.get("price", 0) or 0),
+                        "inStock": in_st and st_val > 0,
+                        "stock": st_val if in_st else 0,
+                    }
+            return {}
+
         client = self._get_http()
-        headers = {
-            "X-API-Key": api_key.strip(),
-            "Content-Type": "application/json",
-            "User-Agent": "KingToolMultiSourceRouter/1.0",
-        }
-        resp = await client.get(f"{base}/products/{remote_product_id.strip()}", headers=headers, timeout=15.0)
+        resp = await client.get(
+            f"{base}/products/{r_pid}",
+            headers=self._external_headers(api_key),
+            timeout=15.0,
+        )
+        if resp.status_code == 404:
+            # Fallback nếu nguồn dùng GET /products giống DanteHub
+            r_all = await client.get(f"{base}/products", headers=self._external_headers(api_key), timeout=15.0)
+            if r_all.status_code == 200:
+                for item in r_all.json().get("products", []):
+                    if str(item.get("id", "")).strip() == r_pid:
+                        in_st = bool(item.get("in_stock", item.get("inStock", False)))
+                        raw_st = item.get("stock")
+                        st_val = int(raw_st) if raw_st is not None else (50 if in_st else 0)
+                        return {
+                            "id": r_pid,
+                            "name": str(item.get("title") or item.get("name") or r_pid),
+                            "price": float(item.get("price", 0) or 0),
+                            "inStock": in_st and st_val > 0,
+                            "stock": st_val if in_st else 0,
+                        }
         resp.raise_for_status()
         return resp.json()
+
+    @staticmethod
+    def _extract_dante_keys(delivery_val: Any, qty: int = 1) -> list[str]:
+        if not delivery_val:
+            return []
+        if isinstance(delivery_val, list):
+            return [str(k).strip() for k in delivery_val if str(k).strip()]
+        txt = str(delivery_val).strip()
+        if not txt:
+            return []
+        lines = [ln.strip() for ln in txt.splitlines() if ln.strip()]
+        if qty > 1 and len(lines) >= qty:
+            return lines
+        return [txt]
+
+    async def get_external_api_order_status(
+        self,
+        api_base_url: str,
+        api_key: str,
+        remote_order_id: str,
+    ) -> dict[str, Any]:
+        """Kiểm tra trạng thái đơn hàng trên @DanteHubBot (`GET /orders/:order_id`) hoặc Reseller API v1."""
+        base = self._normalize_external_base(api_base_url)
+        client = self._get_http()
+        resp = await client.get(
+            f"{base}/orders/{remote_order_id.strip()}",
+            headers=self._external_headers(api_key),
+            timeout=15.0,
+        )
+        resp.raise_for_status()
+        data = resp.json()
+        ord_obj = data.get("order") if isinstance(data.get("order"), dict) else data
+        raw_status = str(ord_obj.get("status") or "processing").lower()
+        keys: list[str] = []
+        if ord_obj.get("deliveredKeys"):
+            keys = [str(k) for k in ord_obj["deliveredKeys"]]
+        elif ord_obj.get("deliveredKey"):
+            keys = [str(ord_obj["deliveredKey"])]
+        elif ord_obj.get("delivery"):
+            keys = self._extract_dante_keys(ord_obj.get("delivery"), int(ord_obj.get("qty", 1) or 1))
+
+        if raw_status == "delivered" or keys:
+            norm_status = "delivered"
+        elif raw_status in ("cancelled", "canceled", "refunded", "failed"):
+            norm_status = "cancelled"
+        else:
+            norm_status = "paid"
+
+        return {
+            "orderId": str(ord_obj.get("order_id") or ord_obj.get("orderId") or remote_order_id),
+            "status": norm_status,
+            "raw_status": raw_status,
+            "deliveredKeys": keys,
+            "deliveredKey": keys[0] if keys else "",
+        }
 
     async def create_external_api_order(
         self,
@@ -282,33 +487,164 @@ class ProdSellerClient:
         email: str | None = None,
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
-        """Mua hàng tự động từ cổng Reseller API v1 của nguồn dự phòng bên ngoài."""
-        base = api_base_url.strip().rstrip("/")
-        if not base.endswith("/v1"):
-            base = f"{base}/v1"
+        """Mua hàng tự động từ @DanteHubBot (`POST /orders`) hoặc cổng Reseller API v1."""
+        base = self._normalize_external_base(api_base_url)
+        r_pid = remote_product_id.strip()
+        qty = max(1, int(quantity))
+        client = self._get_http()
+
+        if self.is_dantehub_url(base):
+            raw_ref = idempotency_key or f"kt-{int(time.time() * 1000)}"
+            safe_ref = re.sub(r"[^A-Za-z0-9._:-]", "-", raw_ref)[:64]
+            payload_dh = {
+                "product_id": r_pid,
+                "qty": min(20, qty),
+                "ref": safe_ref,
+            }
+            resp = await client.post(
+                f"{base}/orders",
+                headers=self._external_headers(api_key, idempotency_key=safe_ref),
+                json=payload_dh,
+                timeout=30.0,
+            )
+            data = resp.json()
+            if resp.status_code >= 400 or data.get("ok") is False or "error" in data:
+                err_obj = data.get("error")
+                if isinstance(err_obj, dict):
+                    err_msg = f"{err_obj.get('code', 'dante_error')}: {err_obj.get('message', '')}"
+                else:
+                    err_msg = str(err_obj or f"HTTP {resp.status_code}")
+                raise RuntimeError(err_msg)
+
+            ord_obj = data.get("order") if isinstance(data.get("order"), dict) else data
+            oid = str(ord_obj.get("order_id") or ord_obj.get("orderId") or safe_ref)
+            raw_st = str(ord_obj.get("status") or "processing").lower()
+            keys = self._extract_dante_keys(ord_obj.get("delivery"), qty)
+
+            # Nếu DanteHub trả status="processing", chờ nhanh 2 nhịp (1.5s + 2.0s) để lấy key ngay lập tức nếu có
+            if not keys and raw_st in ("processing", "pending") and oid:
+                for wait_sec in (1.5, 2.0):
+                    await asyncio.sleep(wait_sec)
+                    try:
+                        polled = await self.get_external_api_order_status(base, api_key, oid)
+                        if polled.get("deliveredKeys"):
+                            keys = polled["deliveredKeys"]
+                            raw_st = "delivered"
+                            break
+                        if polled.get("status") == "cancelled":
+                            raise RuntimeError(f"Đơn hàng DanteHub {oid} đã bị hủy.")
+                    except RuntimeError:
+                        raise
+                    except Exception:
+                        pass
+
+            norm_status = "delivered" if (keys or raw_st == "delivered") else "paid"
+            return {
+                "orderId": oid,
+                "status": norm_status,
+                "deliveredKeys": keys,
+                "deliveredKey": keys[0] if keys else "",
+                "amount": float(ord_obj.get("total", 0) or 0),
+            }
+
         payload: dict[str, Any] = {
-            "productId": remote_product_id.strip(),
-            "quantity": quantity,
+            "productId": r_pid,
+            "quantity": qty,
         }
         if email:
-            if quantity == 1:
+            if qty == 1:
                 payload["email"] = email.strip()
             else:
-                payload["emails"] = [email.strip()] * quantity
-        headers = {
-            "X-API-Key": api_key.strip(),
-            "Content-Type": "application/json",
-            "User-Agent": "KingToolMultiSourceRouter/1.0",
-        }
-        if idempotency_key:
-            headers["Idempotency-Key"] = idempotency_key[:100]
-        client = self._get_http()
-        resp = await client.post(f"{base}/orders", headers=headers, json=payload, timeout=30.0)
+                payload["emails"] = [email.strip()] * qty
+        resp = await client.post(
+            f"{base}/orders",
+            headers=self._external_headers(api_key, idempotency_key=idempotency_key),
+            json=payload,
+            timeout=30.0,
+        )
         data = resp.json()
         if resp.status_code >= 400 or "error" in data:
-            err_msg = data.get("error") or f"HTTP {resp.status_code}"
+            err_obj = data.get("error")
+            if isinstance(err_obj, dict):
+                err_msg = f"{err_obj.get('code', 'api_error')}: {err_obj.get('message', '')}"
+            else:
+                err_msg = str(err_obj or f"HTTP {resp.status_code}")
             raise RuntimeError(err_msg)
         return data
+
+    async def sync_all_dante_backups(
+        self,
+        db: Any,
+        dante_key: str,
+        dante_url: str = DANTE_BASE_URL,
+        auto_seed_defaults: bool = True,
+    ) -> dict[str, int]:
+        """Đồng bộ toàn bộ nguồn dự phòng @DanteHubBot trong 1 request duy nhất:
+        - Nếu `auto_seed_defaults=True`, tự động đấu nối 17 sản phẩm tương đương giữa ProdSeller & DanteHub.
+        - Cập nhật giá vốn VNĐ (theo tỷ giá `vnd_rate`) và tồn kho thực tế từ @DanteHubBot.
+        """
+        clean_key = (dante_key or "").strip()
+        if not clean_key:
+            return {"linked": 0, "in_stock": 0, "seeded": 0}
+
+        catalog = await self.fetch_dantehub_catalog(dante_url, clean_key, force=True)
+        dh_map = {str(item.get("id", "")).strip(): item for item in catalog if item.get("id")}
+        rate = float(db.get_setting("vnd_rate", "25500") or 25500.0)
+        bmap = db.get_all_backup_sources()
+
+        seeded = 0
+        if auto_seed_defaults:
+            for ps_pid, dh_pid, src_name in DEFAULT_DANTE_MAPPINGS:
+                existing_list = bmap.get(ps_pid, [])
+                already_has = any(
+                    s.get("source_type") == "api"
+                    and (
+                        str(s.get("remote_product_id", "")).strip() == dh_pid
+                        or "dante" in str(s.get("source_name", "")).lower()
+                    )
+                    for s in existing_list
+                )
+                if not already_has and dh_pid in dh_map:
+                    dh_item = dh_map[dh_pid]
+                    usd_price = float(dh_item.get("price", 0) or 0)
+                    cost_vnd = max(500, int(round(usd_price * rate)))
+                    in_st = bool(dh_item.get("in_stock", False))
+                    db.add_api_backup_source(
+                        product_id=ps_pid,
+                        source_name=src_name,
+                        cost_vnd=cost_vnd,
+                        api_base_url=dante_url,
+                        api_key=clean_key,
+                        remote_product_id=dh_pid,
+                        remote_stock=50 if in_st else 0,
+                    )
+                    seeded += 1
+            if seeded > 0:
+                bmap = db.get_all_backup_sources()
+
+        linked_cnt = 0
+        in_stock_cnt = 0
+        for _, src_list in bmap.items():
+            for src in src_list:
+                if src.get("source_type") != "api":
+                    continue
+                b_url = str(src.get("api_base_url", ""))
+                if not self.is_dantehub_url(b_url) and "dante" not in str(src.get("source_name", "")).lower():
+                    continue
+                linked_cnt += 1
+                r_pid = str(src.get("remote_product_id", "")).strip()
+                dh_item = dh_map.get(r_pid)
+                if not dh_item:
+                    continue
+                in_st = bool(dh_item.get("in_stock", False))
+                new_st = 50 if in_st else 0
+                if in_st and int(src.get("active", 0) or 0) == 1:
+                    in_stock_cnt += 1
+                usd_price = float(dh_item.get("price", 0) or 0)
+                new_cost = max(500, int(round(usd_price * rate))) if usd_price > 0 else None
+                db.update_api_backup_stock(int(src["id"]), new_st, new_cost)
+
+        return {"linked": linked_cnt, "in_stock": in_stock_cnt, "seeded": seeded}
 
     async def fulfill_multi_source_order(
         self,
@@ -321,7 +657,7 @@ class ProdSellerClient:
         """Định tuyến lấy hàng Đa Nguồn (Multi-Source Failover):
         1. Ưu tiên lấy từ Nguồn 1 (@ProdSellerBot) nếu còn hàng.
         2. Nếu Nguồn 1 hết hàng, thiếu số lượng hoặc gặp lỗi API đột xuất, tự động chuyển sang
-           rút Key từ các Nguồn Dự Phòng (Kho Key nội bộ hoặc API nguồn phụ, ưu tiên giá vốn rẻ nhất).
+           rút Key từ các Nguồn Dự Phòng (Kho Key nội bộ hoặc @DanteHubBot / API nguồn phụ, ưu tiên giá vốn rẻ nhất).
         """
         pid = str(product["id"])
         qty = max(1, int(quantity))
@@ -338,6 +674,7 @@ class ProdSellerClient:
         final_status = "delivered"
         used_backup = False
         last_primary_err: Exception | None = None
+        last_backup_err: Exception | None = None
 
         rem_qty = qty
 
@@ -405,9 +742,11 @@ class ProdSellerClient:
                 elif stype == "api":
                     try:
                         ext_idem = f"{idempotency_key or 'ext'}_b{sid}"
+                        ext_key = str(b_src.get("api_key", "")).strip() or db.get_setting("dante_api_key", "")
+                        ext_url = str(b_src.get("api_base_url", "")).strip() or db.get_setting("dante_base_url", DANTE_BASE_URL)
                         ext_resp = await self.create_external_api_order(
-                            api_base_url=str(b_src.get("api_base_url", "")),
-                            api_key=str(b_src.get("api_key", "")),
+                            api_base_url=ext_url,
+                            api_key=ext_key,
                             remote_product_id=str(b_src.get("remote_product_id", "")),
                             quantity=take_b,
                             email=email,
@@ -418,24 +757,31 @@ class ProdSellerClient:
                             ext_keys = [str(k) for k in ext_resp["deliveredKeys"]]
                         elif ext_resp.get("deliveredKey"):
                             ext_keys = [str(ext_resp["deliveredKey"])]
+                        ext_status = str(ext_resp.get("status", "delivered")).lower()
                         got_cnt = len(ext_keys) if ext_keys else take_b
                         used_backup = True
                         all_keys.extend(ext_keys)
                         total_actual_cost_vnd += got_cnt * b_cost_vnd
                         source_parts.append(f"{sname} [API] (x{got_cnt})")
                         rem_qty -= got_cnt
-                        new_rem_stock = max(0, avail - got_cnt)
-                        db.update_api_backup_stock(sid, new_rem_stock)
+                        if not self.is_dantehub_url(ext_url):
+                            new_rem_stock = max(0, avail - got_cnt)
+                            db.update_api_backup_stock(sid, new_rem_stock)
+                        if ext_status in ("paid", "processing", "pending") and not ext_keys:
+                            final_status = "paid"
                         if not ps_order_id and ext_resp.get("orderId"):
                             ps_order_id = f"EXT_{sid}_{ext_resp['orderId']}"
                     except Exception as ext_exc:
+                        last_backup_err = ext_exc
                         logging.warning("Nguồn API dự phòng %s (#%s) lỗi: %s", sname, sid, ext_exc)
 
         if rem_qty > 0:
             # Nếu chưa mua được gì từ ProdSeller mà kho dự phòng cũng không đủ -> trả lại key dự phòng vào kho và báo lỗi
-            if len(all_keys) == sum(len(klist) for _, klist in popped_rollback_log):
+            if len(all_keys) == sum(len(klist) for _, klist in popped_rollback_log) and final_status != "paid":
                 for sid, klist in popped_rollback_log:
                     db.restore_backup_keys(sid, klist)
+                if last_backup_err is not None:
+                    raise RuntimeError(f"Nguồn dự phòng báo lỗi: {last_backup_err}")
                 if last_primary_err is not None:
                     raise RuntimeError(str(last_primary_err))
                 raise RuntimeError("Kho hàng chính và kho dự phòng hiện không đủ số lượng yêu cầu.")

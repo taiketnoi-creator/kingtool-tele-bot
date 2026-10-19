@@ -61,6 +61,8 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "newbie_gift_voucher": "TANTHU10",   # Mã giảm giá tặng Tân thủ khi tham gia Kênh (mặc định giảm 10%)
     "newbie_gift_points": "5",           # Số điểm thưởng tặng Tân thủ khi tham gia Kênh (mặc định +5 điểm)
     "deposit_reminder_enabled": "1",     # Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút (1=Bật, 0=Tắt)
+    "dante_base_url": "https://dantehub.shop/api/public/v1",  # URL API Nguồn 2 (@DanteHubBot)
+    "dante_api_key": "",                 # API Key đối tác @DanteHubBot (dh_live_...)
 }
 
 TIER_DISCOUNTS: dict[str, int] = {
@@ -1155,7 +1157,23 @@ class Database:
             )
         self._backup_sources_cache = None
 
+    def get_backup_source_by_id(self, source_id: int) -> dict[str, Any] | None:
+        bmap = self.get_all_backup_sources()
+        for items in bmap.values():
+            for s in items:
+                if int(s.get("id", 0) or 0) == int(source_id):
+                    return dict(s)
+        return None
+
     # --- Bình Ổn Giá Thông Minh (Markup 200% + Khóa Sàn Lợi Nhuận Tối Thiểu >= 150%) ---
+    @staticmethod
+    def _round_ceil_nice_vnd(raw_val: float) -> int:
+        import math
+
+        if raw_val < 5000:
+            return max(500, int(math.ceil(raw_val / 500.0) * 500))
+        return int(math.ceil(raw_val / 1000.0) * 1000)
+
     def compute_primary_base_price(
         self,
         product_id: str,
@@ -1189,13 +1207,13 @@ class Database:
         - Ưu tiên GIỮ NGUYÊN giá chuẩn `primary_base_vnd` của Nguồn 1 để khách không thấy nhảy giá.
         - 🛡️ Khóa Sàn Lợi Nhuận Tối Thiểu (`min_profit_percent`, mặc định 150%):
           Nếu nguồn dự phòng có giá vốn cao khiến lãi tại mức `primary_base_vnd` tụt xuống dưới 150%,
-          tự động nâng nhẹ giá bán lên đúng ngưỡng `active_cost_vnd * (1 + min_profit_pct/100)` để đảm bảo
-          tỷ suất lợi nhuận KHÔNG BAO GIỜ thấp hơn 150%!
+          tự động nâng nhẹ giá bán lên ngưỡng làm tròn lên của `active_cost_vnd * (1 + min_profit_pct/100)`
+          để đảm bảo tỷ suất lợi nhuận KHÔNG BAO GIỜ thấp hơn 150%!
         """
         if min_profit_pct is None:
             min_profit_pct = float(self.get_setting("min_profit_percent", "150.0") or 0.0)
         floor_raw = active_cost_vnd * (1.0 + max(0.0, min_profit_pct) / 100.0)
-        floor_vnd = self._round_nice_vnd(floor_raw)
+        floor_vnd = self._round_ceil_nice_vnd(floor_raw)
         return max(primary_base_vnd, floor_vnd, active_cost_vnd)
 
     def resolve_supply_allocation(

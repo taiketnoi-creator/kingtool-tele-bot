@@ -29,6 +29,7 @@ from telethon import Button, TelegramClient, events
 from database import TIER_DISCOUNTS, VN_TZ, Database
 from i18n import LANGUAGES, localize_product_description, t
 from prodseller_client import (
+    DANTE_BASE_URL,
     GROUP_EMOJI,
     GROUP_ICONS,
     ProdSellerClient,
@@ -1339,6 +1340,10 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
     """Đồng bộ danh mục sản phẩm và tồn kho ngầm mỗi 60 giây, phát hiện Restock, kiểm tra vốn & chạy Phễu Tự Động."""
     global _LAST_KNOWN_STOCK, _LAST_AUTO_POST_HOUR_KEY, _LAST_SIM_SOCIAL_TS
     try:
+        d_key_init = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
+        d_url_init = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+        if d_key_init:
+            await ps_client.sync_all_dante_backups(db, d_key_init, d_url_init, auto_seed_defaults=True)
         init_prods = await ps_client.sync_products(force=False)
         init_bmap = db.get_all_backup_sources()
         for p in init_prods:
@@ -1355,15 +1360,26 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
         await asyncio.sleep(60)
         loop_cnt += 1
         try:
-            # Đồng bộ tồn kho các nguồn API dự phòng (nếu có) mỗi 5 phút
+            # Đồng bộ tồn kho các nguồn API dự phòng (@DanteHubBot & các API khác) mỗi 5 phút
             if loop_cnt % 5 == 1:
+                d_key = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
+                d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+                if d_key:
+                    try:
+                        await ps_client.sync_all_dante_backups(db, d_key, d_url, auto_seed_defaults=False)
+                    except Exception as d_exc:
+                        logger.debug("Không thể đồng bộ định kỳ @DanteHubBot: %s", d_exc)
+
                 bmap_now = db.get_all_backup_sources()
                 rate_now = float(db.get_setting("vnd_rate", "25500") or 25500.0)
                 for _, src_list in bmap_now.items():
                     for src in src_list:
                         if src.get("source_type") == "api" and int(src.get("active", 0) or 0) == 1:
+                            b_url = str(src.get("api_base_url", ""))
+                            if ps_client.is_dantehub_url(b_url):
+                                continue
                             info = await ps_client.fetch_external_api_product(
-                                str(src.get("api_base_url", "")),
+                                b_url,
                                 str(src.get("api_key", "")),
                                 str(src.get("remote_product_id", "")),
                             )
@@ -1450,6 +1466,19 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     except Exception as exc:
         ps_bal_str = f"Lỗi kết nối ({exc})"
 
+    dante_key = (settings.get("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
+    dante_url = (settings.get("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+    if not dante_key:
+        dante_bal_str = "Chưa cài API Key (Bấm 🔑 Key @DanteHubBot bên dưới)"
+    else:
+        try:
+            d_info = await ps_client.get_external_balance(dante_url, dante_key)
+            d_usd = float(d_info.get("balance", 0.0) or 0.0)
+            d_vnd = int(round(d_usd * rate))
+            dante_bal_str = f"{d_vnd:,}đ (${d_usd:.2f} {d_info.get('currency', 'USDT')} | Đã kết nối 🟢)"
+        except Exception as exc:
+            dante_bal_str = f"Lỗi kết nối ({exc})"
+
     used_sp, limit_sp, can_sp = db.get_sepay_quota_status()
     in_night = db.is_in_night_auto_window()
     has_token = bool((settings.get("sepay_api_token", "") or os.getenv("SEPAY_API_TOKEN", "")).strip())
@@ -1491,7 +1520,8 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     pending_cnt = stats.get("pending_deposits_count", 0)
     text = (
         "⚙️ **BẢNG ĐIỀU KHIỂN ADMIN (RESELLER PANEL)**\n\n"
-        f"🏦 **Vốn bên @ProdSellerBot:** `{ps_bal_str}`\n"
+        f"🏦 **Vốn Nguồn 1 (@ProdSellerBot):** `{ps_bal_str}`\n"
+        f"🏦 **Vốn Nguồn 2 (@DanteHubBot):** `{dante_bal_str}`\n"
         f"🔔 Cảnh báo sắp hết vốn: **Khi dưới `${low_bal_usd:.2f}`**\n"
         f"📦 **Kho dự phòng đa nguồn:** **{active_src_cnt} nguồn** đang bật (**{total_backup_keys} key** sẵn sàng)\n"
         f"👥 Tổng khách hàng: **{stats['users_count']}** | 📦 Tổng đơn: **{stats['orders_count']}**\n"
@@ -1524,6 +1554,10 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
         [
             Button.inline("🏷️ Quản lý SP & Nguồn Hàng Dự Phòng", b"adm:plist:0", style="primary"),
             Button.inline("🎟️ Quản lý Voucher", b"adm:vouchers", style="primary"),
+        ],
+        [
+            Button.inline("🔄 Đồng Bộ @DanteHubBot", b"adm:dante_sync", style="success"),
+            Button.inline("🔑 Key @DanteHubBot", b"adm:set:dante_api_key"),
         ],
         [
             Button.inline(f"📈 Markup Chuẩn (+{settings['markup_percent']}%)", b"adm:set:markup_percent"),
@@ -1761,10 +1795,11 @@ async def render_admin_edit_product(event: Any, product_id: str) -> None:
 
     rows: list[list[Any]] = [
         [
-            Button.inline("➕ Nạp Key Dự Phòng (Từ Bot khác)", f"adm:bsrc_add:{product_id}".encode(), style="success"),
+            Button.inline("⚡ Gắn Nhanh Từ @DanteHubBot (1 Chạm)", f"adm:bsrc_dante:{product_id}".encode(), style="success"),
         ],
         [
-            Button.inline("🔌 Đấu API Nguồn Phụ (Bot/Web khác)", f"adm:bsrc_api:{product_id}".encode(), style="primary"),
+            Button.inline("➕ Nạp Key Dự Phòng (Thủ công)", f"adm:bsrc_add:{product_id}".encode()),
+            Button.inline("🔌 Đấu API Khác", f"adm:bsrc_api:{product_id}".encode(), style="primary"),
         ],
     ]
     for s in b_sources[:6]:
@@ -1792,6 +1827,56 @@ async def render_admin_edit_product(event: Any, product_id: str) -> None:
     await send_or_edit(event, text, buttons=rows)
 
 
+async def render_admin_dante_picker(event: Any, product_id: str) -> None:
+    """Hiển thị danh sách sản phẩm gợi ý từ @DanteHubBot để Admin gắn làm nguồn dự phòng 1 chạm."""
+    p = await ps_client.get_product_by_id(product_id, refresh=False)
+    if not p:
+        return
+    d_key = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
+    d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+    if not d_key:
+        await send_or_edit(
+            event,
+            "⚠️ Chưa cài đặt API Key `@DanteHubBot`. Vui lòng vào `/admin` -> **🔑 Key @DanteHubBot** để nhập Key trước!",
+            buttons=[[Button.inline("« Quay lại", f"adm:editp:{product_id}".encode())]],
+        )
+        return
+
+    matches = await ps_client.search_dantehub_products(p["name"], d_url, d_key, limit=8)
+    rate = float(db.get_setting("vnd_rate", "25500") or 25500.0)
+    min_prof = float(db.get_setting("min_profit_percent", "150.0") or 150.0)
+    p_base_vnd = db.compute_primary_base_price(product_id, float(p["price"]))
+
+    lines = [
+        f"⚡ **GẮN NGUỒN @DanteHubBot (1 CHẠM) — `{p['name']}`**\n",
+        f"🎯 Giá chuẩn K1 (+{db.get_setting('markup_percent', '200')}%): **`{p_base_vnd:,}đ`** | Sàn lãi: **`>= +{min_prof:g}%`**\n",
+        "👇 **Chọn sản phẩm tương ứng trên `@DanteHubBot` bên dưới để đấu nối tự động:**",
+    ]
+    rows: list[list[Any]] = []
+    for m in matches:
+        dh_id = str(m["id"])
+        title = str(m.get("title") or m.get("name") or dh_id)
+        usd_val = float(m.get("price", 0) or 0)
+        cost_vnd = max(500, int(round(usd_val * rate)))
+        stab_vnd = db.compute_stabilized_unit_price(p_base_vnd, cost_vnd, min_prof)
+        prof_pct = ((stab_vnd - cost_vnd) / cost_vnd * 100.0) if cost_vnd > 0 else 200.0
+        in_st = bool(m.get("in_stock", False))
+        st_icon = "🟢" if in_st else "🔴"
+        lines.append(
+            f"• {st_icon} **{title}**\n"
+            f"  Vốn Dante: **`{cost_vnd:,}đ`** (`${usd_val:g}`) ➡️ Giá bán bình ổn: **`{stab_vnd:,}đ`** *(Lãi `+{prof_pct:.0f}%`)*"
+        )
+        rows.append([
+            Button.inline(
+                f"{st_icon} Gắn: {title[:24]} (Vốn {cost_vnd // 1000}k -> Bán {stab_vnd // 1000}k)",
+                f"adm:bsrc_dpick:{product_id}:{dh_id}".encode(),
+                style="success" if in_st else None,
+            )
+        ])
+    rows.append([Button.inline("« Quay lại sản phẩm", f"adm:editp:{product_id}".encode())])
+    await send_or_edit(event, "\n".join(lines), buttons=rows)
+
+
 # ==================== BACKGROUND TASK FOR ACTIVATION ORDERS ====================
 async def poll_pending_activations_loop(client: TelegramClient) -> None:
     while True:
@@ -1799,7 +1884,21 @@ async def poll_pending_activations_loop(client: TelegramClient) -> None:
         pending = db.get_pending_activation_orders()
         for o in pending:
             try:
-                st = await ps_client.get_order_status(o["prodseller_order_id"])
+                ps_oid = str(o.get("prodseller_order_id") or "")
+                if ps_oid.startswith("EXT_"):
+                    parts = ps_oid.split("_", 2)
+                    if len(parts) == 3:
+                        sid = int(parts[1])
+                        remote_oid = parts[2]
+                        src = db.get_backup_source_by_id(sid)
+                        b_url = (src.get("api_base_url") if src else "") or db.get_setting("dante_base_url", DANTE_BASE_URL)
+                        b_key = (src.get("api_key") if src else "") or db.get_setting("dante_api_key", "")
+                        st = await ps_client.get_external_api_order_status(str(b_url), str(b_key), remote_oid)
+                    else:
+                        continue
+                else:
+                    st = await ps_client.get_order_status(ps_oid)
+
                 if st.get("status") == "delivered":
                     keys: list[str] = []
                     if st.get("deliveredKeys"):
@@ -1811,12 +1910,20 @@ async def poll_pending_activations_loop(client: TelegramClient) -> None:
                     await client.send_message(
                         o["user_id"],
                         (
-                            f"🎉 **Đơn hàng kích hoạt #{o['id']} đã hoàn tất!**\n\n"
+                            f"🎉 **Đơn hàng #{o['id']} đã hoàn tất!**\n\n"
                             f"🛍️ Sản phẩm: **{o['product_name']}**\n"
-                            f"📧 Email: `{o['activation_email']}`\n"
-                            f"🔑 Chi tiết: `{key_text}`"
+                            f"🔑 Tài khoản / Key:\n`{key_text}`"
                         ),
                     )
+                elif st.get("status") == "cancelled":
+                    refund_vnd = vnd_int(o.get("retail_price", 0))
+                    db.mark_order_delivered(o["id"], ["[CANCELLED_REFUNDED]"])
+                    if refund_vnd > 0:
+                        db.adjust_balance(int(o["user_id"]), refund_vnd)
+                        await client.send_message(
+                            o["user_id"],
+                            f"⚠️ Đơn hàng `#{o['id']}` (**{o['product_name']}**) bị hủy từ nhà cung cấp. Hệ thống đã hoàn trả **+{refund_vnd:,}đ** vào ví của bạn!",
+                        )
             except Exception as exc:
                 logger.debug("Chưa lấy được trạng thái đơn %s: %s", o["prodseller_order_id"], exc)
 
@@ -2630,9 +2737,72 @@ async def run_bot() -> None:
                 return
 
             if data == "adm:sync":
-                await event.answer("⏳ Đang đồng bộ lại toàn bộ sản phẩm & tồn kho từ ProdSeller...")
+                await event.answer("⏳ Đang đồng bộ lại toàn bộ sản phẩm & tồn kho từ ProdSeller + DanteHub...")
+                d_key = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
+                d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+                if d_key:
+                    try:
+                        await ps_client.sync_all_dante_backups(db, d_key, d_url, auto_seed_defaults=True)
+                    except Exception:
+                        pass
                 await ps_client.sync_products(force=True)
                 await render_admin_home(event)
+                return
+
+            if data == "adm:dante_sync":
+                d_key = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
+                d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+                if not d_key:
+                    await event.answer("⚠️ Bạn chưa cài API Key @DanteHubBot! Hãy bấm nút '🔑 Key @DanteHubBot'.", alert=True)
+                    return
+                await event.answer("⏳ Đang đồng bộ bảng giá & tồn kho 124 SP từ @DanteHubBot...")
+                try:
+                    res = await ps_client.sync_all_dante_backups(db, d_key, d_url, auto_seed_defaults=True)
+                    await event.respond(
+                        f"✅ **ĐỒNG BỘ @DanteHubBot HOÀN TẤT!**\n\n"
+                        f"🔗 Tổng sản phẩm đang đấu nối dự phòng: **{res['linked']} SP** (Mới gắn thêm: **{res['seeded']} SP**)\n"
+                        f"🟢 Số nguồn `@DanteHubBot` đang sẵn hàng: **{res['in_stock']} SP**\n"
+                        f"🛡️ Mọi sản phẩm dự phòng từ `@DanteHubBot` đều tự động áp dụng **Bình ổn giá (+200% Markup chuẩn, khóa sàn lãi >= +{db.get_setting('min_profit_percent', '150')}% )**!",
+                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    )
+                except Exception as exc:
+                    await event.respond(
+                        f"❌ Lỗi đồng bộ `@DanteHubBot`: `{exc}`",
+                        buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    )
+                return
+
+            if data.startswith("adm:bsrc_dante:"):
+                await event.answer()
+                pid = data.split(":", 2)[2]
+                await render_admin_dante_picker(event, pid)
+                return
+
+            if data.startswith("adm:bsrc_dpick:"):
+                parts = data.split(":", 3)
+                if len(parts) < 4:
+                    return
+                pid, dh_id = parts[2], parts[3]
+                d_key = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
+                d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+                info = await ps_client.fetch_external_api_product(d_url, d_key, dh_id)
+                if not info:
+                    await event.answer("❌ Không tìm thấy sản phẩm trên @DanteHubBot.", alert=True)
+                    return
+                rate = float(db.get_setting("vnd_rate", "25500") or 25500.0)
+                cost_vnd = max(500, int(round(float(info.get("price", 0) or 0) * rate)))
+                init_st = int(info.get("stock", 50) or 50) if info.get("inStock") else 0
+                db.add_api_backup_source(
+                    product_id=pid,
+                    source_name="DanteHub",
+                    cost_vnd=cost_vnd,
+                    api_base_url=d_url,
+                    api_key=d_key,
+                    remote_product_id=dh_id,
+                    remote_stock=init_st,
+                )
+                await event.answer(f"✅ Đã gắn nguồn @DanteHubBot ({info.get('name', dh_id)[:20]})!", alert=True)
+                await render_admin_edit_product(event, pid)
                 return
 
             if data.startswith("adm:plist:"):
@@ -2771,6 +2941,11 @@ async def run_bot() -> None:
                         "1. Đăng ký tài khoản miễn phí tại `https://my.sepay.vn` và liên kết ngân hàng.\n"
                         "2. Vào mục **Cấu hình Công ty -> API Access** để copy **API Token**.\n"
                         "3. Dán **API Token** vào đây (hoặc gõ `off` để tắt):"
+                    ),
+                    "dante_api_key": (
+                        "🔑 **CÀI ĐẶT API KEY NGUỒN 2 (@DanteHubBot)**\n\n"
+                        "1. Mở `@DanteHubBot` -> Bấm **🔑 API Access** -> Tạo hoặc copy khóa `dh_live_...`.\n"
+                        "2. Dán khóa **API Key (`dh_live_...`)** vào đây để hệ thống tự động đồng bộ 17+ sản phẩm dự phòng và lấy hàng tự động khi `@ProdSellerBot` hết hàng:"
                     ),
                 }
                 USER_AWAITING[uid] = {"type": "set_setting", "key": setting_key}
@@ -3288,10 +3463,16 @@ async def run_bot() -> None:
                 except ValueError:
                     await event.respond("❌ Giá trị số không hợp lệ, vui lòng nhập lại:")
                     return
-            elif key == "sepay_api_token" and text.strip().lower() == "off":
+            elif key in ("sepay_api_token", "dante_api_key") and text.strip().lower() == "off":
                 db.set_setting(key, "")
             else:
                 db.set_setting(key, text.strip())
+                if key == "dante_api_key":
+                    try:
+                        d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
+                        await ps_client.sync_all_dante_backups(db, text.strip(), d_url, auto_seed_defaults=True)
+                    except Exception:
+                        pass
             USER_AWAITING.pop(uid, None)
             await event.respond(f"✅ Đã cập nhật `{key}` thành công!")
             await render_admin_home(event, force_new=True)

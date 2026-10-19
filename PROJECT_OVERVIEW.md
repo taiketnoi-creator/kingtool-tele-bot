@@ -7,13 +7,15 @@
 
 ## 1. Mục Đích & Mô Hình Kinh Doanh
 
-- **Mô hình:** Bot Telegram bán tài khoản/phần mềm số tự động 24/7 theo mô hình **Reseller (Đại lý trung gian)**.
-- **Nguồn hàng gốc (Upstream Provider):** Kết nối trực tiếp với **ProdSeller Official API v1** (`https://prodseller.com/v1`).
+- **Mô hình:** Bot Telegram bán tài khoản/phần mềm số tự động 24/7 theo mô hình **Reseller Đa Nguồn (Multi-Source Reseller)**.
+- **Nguồn hàng gốc (Upstream Providers):**
+  - **Nguồn 1 (Kho chính):** **ProdSeller Official API v1** (`https://prodseller.com/v1` - `@ProdSellerBot`).
+  - **Nguồn 2 (Kho dự phòng tự động):** **DanteHub Partner API v1** (`https://dantehub.shop/api/public/v1` - `@DanteHubBot`) cùng hệ thống Kho Key nội bộ (`telebot.backup_sources`).
 - **Luồng hoạt động cốt lõi:**
-  1. Bot tự động đồng bộ danh sách sản phẩm, mô tả, giá vốn (USD) và số lượng tồn kho (`stock`) từ ProdSeller.
-  2. Tự động quy đổi giá vốn USD sang **Việt Nam Đồng (VNĐ)** theo tỷ giá cài đặt và cộng thêm biên lợi nhuận (`markup_percent` + `markup_fixed`) hoặc giá bán lẻ riêng từng món (`product_overrides`).
+  1. Bot tự động đồng bộ danh sách sản phẩm, mô tả, giá vốn (USD/USDT) và số lượng tồn kho (`stock`) từ `@ProdSellerBot` (Nguồn 1) kết hợp 17+ nguồn hàng dự phòng tự động từ `@DanteHubBot` (Nguồn 2).
+  2. Tự động quy đổi giá vốn USD sang **Việt Nam Đồng (VNĐ)** theo tỷ giá cài đặt và áp dụng thuật toán **Bình Ổn Giá Thông Minh (`markup_percent = 200%`, khóa sàn lợi nhuận tối thiểu `min_profit_percent = 150%` bằng làm tròn lên `_round_ceil_nice_vnd`)**.
   3. Khách hàng nạp tiền vào ví trên Bot bằng **Chuyển khoản Ngân hàng VietQR** (có mã đối soát `KINGTOOL CAM ON SPX...`).
-  4. Khi khách bấm mua hàng -> Bot trừ số dư ví VNĐ nguyên tử (Atomic) -> Gọi API ProdSeller mua hàng bằng số dư đại lý -> Trả Key/Tài khoản ngay lập tức cho khách (hoặc theo dõi ngầm đơn kích hoạt qua Email đến khi hoàn tất).
+  4. Khi khách bấm mua hàng -> Bot trừ số dư ví VNĐ nguyên tử (Atomic) -> Tự động định tuyến đơn hàng sang Nguồn 1 (`@ProdSellerBot`), nếu Nguồn 1 hết hàng hoặc thiếu số lượng sẽ tự động bù từ Nguồn 2 (`@DanteHubBot` hoặc Kho Key dự phòng) -> Trả Key/Tài khoản ngay lập tức cho khách (hoặc theo dõi ngầm đơn `processing` đến khi hoàn tất).
 
 ---
 
