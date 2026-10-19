@@ -5,6 +5,34 @@
 
 ---
 
+## [v2.7.0] - 2026-10-19: Hệ Thống Đa Nguồn Hàng Dự Phòng Tự Động (Multi-Source Failover) & Bình Ổn Giá Thông Minh (Khóa Sàn Lãi `>= 150%`)
+
+### 📦 1. Cơ chế Đa Nguồn Hàng Tự Động Bù Kho (`telebot.backup_sources`)
+- **Cơ sở dữ liệu (`database.py` - Schema `telebot`):**
+  - Bổ sung bảng `telebot.backup_sources` vào `_TABLE_NAME_RE` và `_init_db()` (tương thích song song Supabase PostgreSQL & SQLite Local, kèm **Write-Through RAM Cache** `_backup_sources_cache` TTL 60s).
+  - Hỗ trợ 2 chế độ nguồn hàng dự phòng cho từng sản phẩm:
+    - **`local_stock` (Kho Key dự phòng từ các Bot khác):** Admin dán danh sách Key/Tài khoản mua từ các Bot khác kèm mức giá vốn VNĐ (`cost_vnd`). Khi kho chính `@ProdSellerBot` hết hàng (`stock = 0`) hoặc không đủ số lượng khách đặt, Bot tự động rút Key nguyên tử (`pop_backup_keys_atomic`) từ nguồn dự phòng rẻ nhất để giao ngay cho khách trong 2 giây.
+    - **`api` (Đấu nối API Reseller Bot/Web phụ):** Tự động đồng bộ tồn kho mỗi 5 phút và tự động gọi API đặt hàng (`create_external_api_order`) khi kho chính hết hàng.
+  - Cộng gộp tồn kho (`get_effective_product_stock`): Hiển thị tổng tồn kho thực tế (`Kho chính K1 + Các kho dự phòng`) trên toàn bộ Menu Bot, Kênh `@KingToolShopOfficial` và cổng Public API `/v1/*`.
+
+### 🛡️ 2. Thuật toán Bình Ổn Giá Thông Minh & Khóa Sàn Lợi Nhuận Tối Thiểu (`>= 150%`)
+- **Giải quyết bài toán chênh lệch giá vốn giữa các Bot nguồn mà không làm nhảy giá đột ngột:**
+  - Thiết lập mức tăng giá mục tiêu trên Kho chính (`markup_percent = 200.0%`) và **Sàn lợi nhuận tối thiểu bắt buộc (`min_profit_percent = 150.0%`)**.
+  - **Công thức Bình ổn giá (`compute_stabilized_unit_price` & `resolve_supply_allocation`):**
+    $$\text{Giá bán bình ổn} = \max\Big(\text{Giá chuẩn Kho chính (+200\%)},\; \text{Giá vốn nguồn đang chạy} \times \big(1 + \frac{\text{min\_profit\_percent}}{100}\big)\Big)$$
+  - **Ví dụ thực tế:**
+    - Kho chính `@ProdSellerBot` có giá vốn `30,000đ` $\rightarrow$ Giá bán chuẩn (`+200%`) = **`90,000đ`**.
+    - Khi Kho chính hết hàng, chuyển sang **Nguồn dự phòng Bot B** có giá vốn `35,000đ`: Bán ở mức **`90,000đ`** vẫn thu lãi `+55,000đ` (**`+157% >= 150%`**) $\rightarrow$ Hệ thống **GIỮ NGUYÊN GIÁ BÁN `90,000đ`** (bình ổn giá 100%, khách hàng không thấy giá thay đổi).
+    - Nếu chuyển sang **Nguồn dự phòng Bot C** có giá vốn cao `40,000đ`: Để đảm bảo sàn lãi không tụt xuống dưới `150%`, hệ thống tự động nhích nhẹ giá bán lên **`100,000đ`** (`40,000đ * 2.5`) thay vì nhảy vọt lên `120,000đ`, vừa giữ chân khách vừa khóa chặt **tỷ suất lợi nhuận `>= 150%`**.
+
+### ⚙️ 3. Quản trị Đa Nguồn Hàng ngay trong `/admin` (`bot.py`)
+- Thêm nút **`🛡️ Sàn Lãi Tối Thiểu (>=150%)`** ngay trên Bảng điều khiển `/admin` và thống kê tổng số nguồn dự phòng + tổng số Key dự phòng sẵn sàng.
+- Trong mục **`🏷️ Quản lý SP & Nguồn Hàng Dự Phòng`** $\rightarrow$ bấm vào từng sản phẩm:
+  - Hiển thị rõ: Tồn kho chính `K1`, Tồn kho dự phòng `+DP`, Giá vốn K1, Giá chuẩn `+200%`, Giá bán bình ổn hiện tại và danh sách từng nguồn dự phòng kèm mức giá bán & `%` lãi khi bù hàng.
+  - Trang bị nút **`➕ Nạp Key Dự Phòng (Từ Bot khác)`**, **`🔌 Đấu API Nguồn Phụ`**, và các nút Bật/Tắt/Xóa từng nguồn 1 chạm.
+
+---
+
 ## [v2.6.1] - 2026-10-18: Vá Lỗi Hiển Thị Biến Chuỗi Tin Nhắn Nạp Tiền Kèm Khuyến Mãi & Bảo Hành
 
 ### 🛠️ Sửa lỗi (Bug Fixes)

@@ -80,16 +80,25 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
    - `id BIGSERIAL PRIMARY KEY`, `code TEXT`, `user_id BIGINT`, `order_id BIGINT`, `discount_amount BIGINT`, `used_at TEXT`, `UNIQUE(code, user_id)` (mỗi khách chỉ được dùng 1 lần cho mỗi mã).
 8. **`telebot.api_keys`**:
    - `user_id BIGINT PRIMARY KEY`, `api_key TEXT UNIQUE` (`ktk_...`), `total_requests BIGINT`, `active INTEGER`, `created_at TEXT`.
+9. **`telebot.backup_sources`**:
+   - `id BIGSERIAL PRIMARY KEY`, `product_id TEXT`, `source_name TEXT` (tên Bot/Kho phụ), `source_type TEXT` (`local_stock` = kho Key nạp sẵn từ Bot khác, `api` = đấu nối API Reseller khác), `cost_vnd BIGINT` (giá vốn VNĐ của nguồn phụ), `stock_keys TEXT` (JSON array các Key/Tài khoản dự phòng), `api_base_url TEXT`, `api_key TEXT`, `remote_product_id TEXT`, `remote_stock INTEGER`, `active INTEGER`, `created_at TEXT`.
 
 ---
 
 ## 5. Các Nghiệp Vụ & Thuật Toán Quan Trọng
 
-### 5.1. Công thức Giá bán, Hạng VIP, Mã Giảm Giá (Voucher) & Bảo vệ Giá vốn
-- **Giá vốn VNĐ (`cost_vnd`)**: `round(wholesale_usd * vnd_rate)`.
-- **Giá bán lẻ niêm yết (`base_vnd`)**:
+### 5.1. Công thức Giá bán, Hạng VIP, Mã Giảm Giá (Voucher), Bình Ổn Giá Đa Nguồn & Khóa Sàn Lãi `>= 150%`
+- **Giá vốn VNĐ Kho chính (`primary_cost_vnd`)**: `round(wholesale_usd * vnd_rate)`.
+- **Giá bán lẻ chuẩn Kho chính (`primary_base_vnd`)**:
   - Nếu sản phẩm có `custom_price` trong `product_overrides` -> dùng `custom_price`.
-  - Nếu không -> `cost_vnd * (1 + markup_percent / 100) + markup_fixed`, làm tròn đẹp tới `500đ` hoặc `1,000đ`.
+  - Nếu không -> `primary_cost_vnd * (1 + markup_percent / 100) + markup_fixed` (Mặc định `markup_percent = 200.0%`), làm tròn đẹp tới `500đ` hoặc `1,000đ`.
+- **🛡️ Bình Ổn Giá Đa Nguồn & Khóa Sàn Lợi Nhuận Tối Thiểu (`min_profit_percent = 150.0%` - `v2.7.0`):**
+  - Khi Kho chính (`@ProdSellerBot`) còn hàng: Lấy hàng từ Kho chính và bán theo giá chuẩn `+200%` (`primary_base_vnd`).
+  - Khi Kho chính hết hàng (`stock = 0`) hoặc thiếu số lượng: Hệ thống tự động bù hàng từ các **Nguồn Dự Phòng (`telebot.backup_sources`)** đang bật và còn hàng (ưu tiên nguồn có `cost_vnd` rẻ nhất trước).
+  - **Công thức Bình ổn giá thông minh (`compute_stabilized_unit_price`):**
+    $$\text{Giá bán bình ổn} = \max\Big(\text{Giá chuẩn Kho chính (+200\%)},\; \text{Giá vốn nguồn đang chạy} \times \big(1 + \frac{\text{min\_profit\_percent}}{100}\big)\Big)$$
+    - Nếu giá vốn nguồn dự phòng chỉ nhỉnh hơn nhẹ so với Kho chính (sao cho bán ở mức giá chuẩn vẫn đạt lãi **`>= 150%`**): **Giữ nguyên 100% giá bán trên Bot** để khách hàng không thấy giá bị nhảy thất thường.
+    - Nếu giá vốn nguồn dự phòng cao hơn khiến lãi tại giá cũ tụt xuống dưới `150%`: Tự động nhích nhẹ giá bán lên đúng ngưỡng đảm bảo **tỷ suất lợi nhuận không bao giờ thấp hơn `150%`**.
 - **Chiết khấu Hạng thành viên (`TIER_DISCOUNTS`)**:
   - `BRONZE` (< `600,000đ` chi tiêu): giảm `0%`.
   - `SILVER` (>= `600,000đ` chi tiêu): giảm `3%`.
@@ -98,8 +107,8 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
   - Khách hàng bấm `🎟️ Nhập mã giảm giá (Voucher)` ngay trên nút `💳 Mua ngay` ở màn hình Chi tiết sản phẩm.
   - Hỗ trợ giảm theo `%` (làm tròn bậc `500đ`) hoặc giảm số tiền VNĐ cố định, kiểm tra số lượt tối đa (`max_uses`) và giới hạn mỗi khách 1 lần/mã (`telebot.voucher_usages`).
   - Admin quản lý trực tiếp trong `/admin` -> `🎟️ Quản lý Voucher` (Tạo mã nhanh 5 giây, Bật/Tắt 1 chạm, Xóa mã).
-- **🛡️ Nguyên tắc bất khả xâm phạm (Chống lỗ vốn):**
-  - Mọi mức giảm giá (VIP + Voucher kết hợp, hoặc gọi qua cổng Public Reseller API `/v1/*`) đều phải qua chốt chặn `total_final_vnd = max(total_cost_vnd, raw_after_voucher)`. Giá thu của khách **không bao giờ thấp hơn giá vốn đại lý**.
+- **🛡️ Nguyên tắc bất khả xâm phạm (Chống lỗ vốn & Bảo vệ sàn lãi nguồn phụ):**
+  - Mọi mức giảm giá (VIP + Voucher kết hợp, hoặc gọi qua cổng Public Reseller API `/v1/*`) đều phải qua chốt chặn `total_final_vnd >= total_cost_vnd` (và giữ vững sàn lãi `>= min_profit_percent` khi xuất từ nguồn hàng dự phòng).
 
 ### 5.2. Điểm thưởng (Cashback Points) & Link Giới Thiệu (Referral)
 - **Tích điểm khi mua hàng:** Mỗi `10,000đ` chi tiêu = `+1 điểm` (tối thiểu `1 điểm`/đơn).
@@ -136,7 +145,7 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
   - Tự động phát hiện đơn nạp VietQR đang `pending` sau `10–45 phút` chưa hoàn tất và gửi tin nhắn nhắc nhở nhẹ nhàng kèm thông tin ưu đãi nạp tiền (`+5% / +10%`) và nút báo duyệt 1 chạm.
 
 ### 5.7. Cơ chế Tối Ưu Tốc Độ Phản Hồi (`0.15ms` RAM Cache)
-- Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s), `vouchers` (TTL 60s), `api_keys` (TTL 45s) và `users` (TTL 45s).
+- Vì Render đặt tại **Singapore** còn Supabase đặt tại **Sydney (`ap-southeast-2`)**, `database.py` sử dụng **Write-Through RAM Cache** cho `settings` (TTL 60s), `product_overrides` (TTL 60s), `vouchers` (TTL 60s), `backup_sources` (TTL 60s), `api_keys` (TTL 45s) và `users` (TTL 45s).
 - Tuyệt đối **KHÔNG** thực hiện truy vấn SQL lặp trong vòng lặp hiển thị danh sách sản phẩm (tránh lỗi N+1 Query).
 - `prodseller_client.py` sử dụng cơ chế **Stale-While-Revalidate**: trả về danh sách sản phẩm từ RAM ngay lập tức (`force=False`) và đồng bộ ngầm mỗi 45 giây.
 
@@ -144,11 +153,12 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 
 ## 6. Định Hướng Phát Triển Tiếp Theo (Roadmap)
 
-- **Tính năng đã hoàn thành gần nhất (`v2.3.0`, `v2.4.0`, `v2.5.0` & `v2.6.0`):**
+- **Tính năng đã hoàn thành gần nhất (`v2.3.0`, `v2.4.0`, `v2.5.0`, `v2.6.0` & `v2.7.0`):**
   - **Hệ thống Mã Giảm Giá (Voucher System - bảng `telebot.vouchers` & `telebot.voucher_usages`)** kèm chốt chặn bảo vệ giá vốn (`total_final_vnd >= total_cost_vnd`).
   - **Cổng Public Reseller API v1 (`public_api.py` - bảng `telebot.api_keys`) & Trang tài liệu `/api-docs`** kèm mục giải thích dễ hiểu cho khách hàng trên Bot.
   - **Bộ 4 tính năng vận hành tự động (`v2.5.0`):** Cảnh báo hết vốn ProdSeller, Tự động đăng Restock lên Kênh kèm Deep-link mua ngay, Khuyến mãi nạp tiền theo mốc, và Bảo hành 1 chạm trong Lịch sử đơn hàng.
   - **Hệ thống Tự Động Đăng Bài Kênh & Phễu Thu Hút Khách Hàng (`v2.6.0`):** Tự động đăng Bảng giá + Spotlight SP Hot theo khung giờ (`9h, 14h, 20h`, tự xóa bài cũ), Phễu bắt buộc Join Kênh nhận Quà Tân Thủ (`+5 điểm` + tự động gắn mã `TANTHU10`), Tự động tạo hiệu ứng đơn hàng hoàn tất (Social Proof), và Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút.
+  - **Hệ thống Đa Nguồn Hàng Dự Phòng Tự Động Chuyển Đổi (Multi-Source Failover) & Bình Ổn Giá Thông Minh (`v2.7.0`):** Tự động bù hàng từ Kho Key dự phòng (lấy từ các Bot khác) hoặc API phụ khi `@ProdSellerBot` hết hàng; giữ nguyên giá bán chuẩn `+200%` nếu biên lợi nhuận đạt `>= 150%` và tự động nâng sàn giá vừa đủ để khóa chặt tỷ suất lợi nhuận không bao giờ thấp hơn `150%`.
 
 ---
 
@@ -156,5 +166,5 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
 
 1. **Bảo mật:** Không bao giờ commit file `.env`, `*.session`, `shop.db` lên Git.
 2. **Database Schema:** Mọi bảng mới thêm vào `database.py` phải được thêm vào biểu thức chính quy `_TABLE_NAME_RE` để tự động nằm trong Schema `telebot.*` trên Supabase (tuyệt đối không làm bẩn Schema `public` của dự án `Base Family`).
-3. **Hiệu năng:** Khi đọc cấu hình hoặc tính giá trong vòng lặp, luôn dùng dữ liệu từ RAM Cache (`get_all_settings()`, `get_all_overrides()`), không gọi truy vấn mạng lẻ tẻ.
+3. **Hiệu năng:** Khi đọc cấu hình hoặc tính giá trong vòng lặp, luôn dùng dữ liệu từ RAM Cache (`get_all_settings()`, `get_all_overrides()`, `get_all_backup_sources()`), không gọi truy vấn mạng lẻ tẻ.
 4. **Đồng bộ Cloud:** Sau mỗi lần chỉnh sửa code tại Local, cần kiểm tra cú pháp Python, chạy `git add`, `git commit`, `git push origin main` để Render tự động cập nhật bản mới và ghi chú lại vào `PROJECT_CHANGELOG.md`.

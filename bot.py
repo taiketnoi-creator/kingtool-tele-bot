@@ -179,6 +179,7 @@ async def render_products_menu(event: Any, group_filter: str | None = None) -> N
         return
 
     overrides = db.get_all_overrides()
+    backup_map = db.get_all_backup_sources()
     rows: list[list[Any]] = []
     seen_groups: set[str] = set()
 
@@ -191,8 +192,9 @@ async def render_products_menu(event: Any, group_filter: str | None = None) -> N
         if g:
             st = group_stats.setdefault(g, {"plans": 0, "stock": 0})
             st["plans"] += 1
-            if p.get("inStock") and isinstance(p.get("stock"), int):
-                st["stock"] += int(p["stock"])
+            eff_stock, eff_in_stock, _, _ = db.get_effective_product_stock(p, backup_map)
+            if eff_in_stock and isinstance(eff_stock, int):
+                st["stock"] += eff_stock
 
     owner_premium = os.getenv("OWNER_HAS_PREMIUM", "false").lower()
     use_fallback = owner_premium != "true"
@@ -225,9 +227,16 @@ async def render_products_menu(event: Any, group_filter: str | None = None) -> N
                     ])
                 continue
 
-        _, unit_vnd, _ = db.compute_tier_unit_price(pid, float(p["price"]), tier, overrides)
-        in_stock = bool(p.get("inStock")) and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
-        badge = stock_badge(p.get("stock"), bool(p.get("inStock")))
+        eff_stock, in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
+        _, unit_vnd, _ = db.compute_tier_unit_price(
+            pid,
+            float(p["price"]),
+            tier,
+            overrides,
+            primary_stock=primary_stock,
+            backup_map=backup_map,
+        )
+        badge = stock_badge(eff_stock, in_stock)
         icon_id, prefix = get_product_icon_and_prefix(p["name"], use_fallback_emoji=use_fallback)
         btn_style = "success" if in_stock else "danger"
         btn_label = f"{prefix}{p['name'].strip()} | {unit_vnd:,}đ | {badge}"
@@ -261,8 +270,8 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
         return
     asyncio.create_task(ps_client.get_product_by_id(product_id, refresh=True))
 
-    in_stock = bool(p.get("inStock"))
-    stock_num = p.get("stock")
+    backup_map = db.get_all_backup_sources()
+    stock_num, in_stock, primary_stock, backup_stock = db.get_effective_product_stock(p, backup_map)
     if isinstance(stock_num, int) and stock_num >= 1 and qty > stock_num:
         qty = max(1, stock_num)
 
@@ -274,6 +283,8 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
         tier=tier,
         voucher_code=active_vch,
         user_id=uid,
+        primary_stock=primary_stock,
+        backup_map=backup_map,
     )
     if active_vch and not pricing["voucher_valid"]:
         USER_ACTIVE_VOUCHER.pop(uid, None)
@@ -390,9 +401,10 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
         rows.append([Button.inline(t(lang, "out_of_stock_btn"), b"noop", style="danger")])
 
     if is_admin(uid):
+        k1_lbl = "∞" if primary_stock is None else str(primary_stock)
         rows.append([
             Button.inline(
-                f"⚙️ Vốn: {cost_vnd:,}đ | Sửa giá bán ({base_vnd:,}đ)",
+                f"⚙️ Vốn:{cost_vnd:,}đ | Bán:{base_vnd:,}đ [K1:{k1_lbl} | Dự phòng:{backup_stock}]",
                 f"adm:editp:{product_id}".encode(),
                 style="primary",
             )
@@ -402,7 +414,7 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
     await send_or_edit(event, text, buttons=rows)
 
 
-# ==================== BUY & AUTO-FULFILLMENT (VNĐ + CHỐNG RACE CONDITION + VOUCHER) ====================
+# ==================== BUY & AUTO-FULFILLMENT (ĐA NGUỒN HÀNG + BÌNH ỔN GIÁ + VOUCHER) ====================
 async def execute_purchase(
     client: TelegramClient,
     event: Any,
@@ -423,12 +435,13 @@ async def execute_purchase(
 
     async with lock:
         p = await ps_client.get_product_by_id(product_id, refresh=True)
-        if not p or not p.get("inStock"):
+        if not p:
             await event.respond(t(lang, "out_of_stock_btn"))
             return
 
-        stock_num = p.get("stock")
-        if isinstance(stock_num, int) and stock_num < qty:
+        backup_map = db.get_all_backup_sources()
+        stock_num, in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
+        if not in_stock or (isinstance(stock_num, int) and stock_num < qty):
             await event.respond(t(lang, "out_of_stock_btn"))
             return
 
@@ -452,6 +465,8 @@ async def execute_purchase(
             tier=tier,
             voucher_code=active_vch,
             user_id=uid,
+            primary_stock=primary_stock,
+            backup_map=backup_map,
         )
         total_cost_vnd = pricing["total_cost_vnd"]
         total_retail_vnd = pricing["total_final_vnd"]
@@ -471,16 +486,17 @@ async def execute_purchase(
 
         idem_key = f"ord_{uid}_{uuid.uuid4().hex[:16]}"
         try:
-            order_resp = await ps_client.create_order(
-                product_id=product_id,
+            order_resp = await ps_client.fulfill_multi_source_order(
+                db=db,
+                product=p,
                 quantity=qty,
                 email=activation_email,
                 idempotency_key=idem_key,
             )
         except Exception as exc:
-            # Hoàn tiền tự động nếu kho gốc hết hàng hoặc tài khoản đại lý hết vốn
+            # Hoàn tiền tự động nếu kho gốc & kho dự phòng đều hết hàng hoặc hết vốn
             db.adjust_balance(uid, total_retail_vnd)
-            logger.error("Lỗi mua hàng từ ProdSeller API: %s", exc)
+            logger.error("Lỗi mua hàng từ các nguồn cung cấp: %s", exc)
             await status_msg.edit(
                 t(lang, "order_failed_refunded", refund=total_retail_vnd, err=str(exc))
             )
@@ -492,9 +508,9 @@ async def execute_purchase(
                             f"⚠️ **CẢNH BÁO LỖI ĐƠN HÀNG**\n\n"
                             f"👤 Khách: `{uid}` (@{u['username']})\n"
                             f"🛍️ SP: **{p['name']}** (x{qty})\n"
-                            f"💵 Giá vốn cần trừ bên ProdSeller: **{total_cost_vnd:,}đ** (`${unit_cost_usd * qty:.2f}`)\n"
-                            f"❌ Lỗi từ ProdSeller API: `{exc}`\n"
-                            f"*(Hãy kiểm tra số dư USDT của bạn bên @ProdSellerBot!)*"
+                            f"💵 Giá vốn dự kiến: **{total_cost_vnd:,}đ**\n"
+                            f"❌ Lỗi từ nguồn hàng: `{exc}`\n"
+                            f"*(Hãy kiểm tra số dư USDT @ProdSellerBot hoặc nạp thêm Key vào Kho Dự Phòng!)*"
                         ),
                     )
                 except Exception:
@@ -509,8 +525,8 @@ async def execute_purchase(
 
         ps_order_id = str(order_resp.get("orderId", ""))
         ps_status = str(order_resp.get("status", "delivered"))
-        actual_cost_usd = float(order_resp.get("amount", unit_cost_usd * qty))
-        actual_cost_vnd = db.compute_wholesale_vnd(actual_cost_usd)
+        actual_cost_vnd = int(order_resp.get("actual_cost_vnd", total_cost_vnd))
+        source_summary = str(order_resp.get("source_summary", "ProdSeller"))
 
         local_order_id = db.create_order_record(
             user_id=uid,
@@ -584,6 +600,7 @@ async def execute_purchase(
                 )
 
         profit_vnd = total_retail_vnd - actual_cost_vnd
+        profit_pct = (profit_vnd / actual_cost_vnd * 100.0) if actual_cost_vnd > 0 else 0.0
         for adm_id in ADMIN_IDS:
             try:
                 await client.send_message(
@@ -592,10 +609,11 @@ async def execute_purchase(
                         f"🎉 **ĐƠN HÀNG MỚI #{local_order_id}**\n\n"
                         f"👤 Khách: `{uid}` (@{u['username']})\n"
                         f"🛍️ Sản phẩm: **{p['name']}** (x{qty})\n"
+                        f"📦 Nguồn xuất hàng: **{source_summary}**\n"
                         f"{vch_admin_line}"
                         f"💰 Giá thu khách: **{total_retail_vnd:,}đ**\n"
-                        f"📉 Giá vốn ProdSeller: **{actual_cost_vnd:,}đ** (`${actual_cost_usd:.2f}`)\n"
-                        f"💵 **Lợi nhuận ròng: +{profit_vnd:,}đ**"
+                        f"📉 Giá vốn thực tế: **{actual_cost_vnd:,}đ**\n"
+                        f"💵 **Lợi nhuận ròng: +{profit_vnd:,}đ (+{profit_pct:.0f}%)**"
                     ),
                 )
             except Exception:
@@ -667,6 +685,7 @@ async def post_restock_notification(client: TelegramClient, restocked_items: lis
         if not ch_name or not restocked_items:
             return
         overrides = db.get_all_overrides()
+        backup_map = db.get_all_backup_sources()
         lines = [
             "🔥 **THÔNG BÁO HÀNG VỀ (RESTOCK KHO TỰ ĐỘNG)** 🔥",
             "━━━━━━━━━━━━━━━━━━━━",
@@ -674,9 +693,9 @@ async def post_restock_notification(client: TelegramClient, restocked_items: lis
         rows: list[list[Any]] = []
         for p in restocked_items[:8]:
             pid = p["id"]
-            price_vnd = db.compute_retail_price(pid, float(p["price"]), overrides)
-            st = p.get("stock")
-            st_txt = f"Còn {st} suất" if isinstance(st, int) else "Sẵn hàng"
+            eff_stock, eff_in_stock, p_st, _ = db.get_effective_product_stock(p, backup_map)
+            price_vnd = db.compute_retail_price(pid, float(p["price"]), overrides, primary_stock=p_st, backup_map=backup_map)
+            st_txt = f"Còn {eff_stock} suất" if isinstance(eff_stock, int) and eff_stock > 0 else "Sẵn hàng"
             lines.append(
                 f"🟢 **{p['name'].strip()}**\n"
                 f"   💰 Giá: **`{price_vnd:,}đ`** — 📦 Kho: **{st_txt}**"
@@ -761,12 +780,12 @@ async def post_simulated_social_proof(client: TelegramClient) -> int | None:
             return None
         products = await ps_client.sync_products(force=False)
         overrides = db.get_all_overrides()
+        backup_map = db.get_all_backup_sources()
         in_stock_prods = [
             p
             for p in products
             if not overrides.get(p["id"], {}).get("hidden")
-            and bool(p.get("inStock"))
-            and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
+            and db.get_effective_product_stock(p, backup_map)[1]
         ]
         if not in_stock_prods:
             return None
@@ -774,7 +793,8 @@ async def post_simulated_social_proof(client: TelegramClient) -> int | None:
         chosen = random.choice(in_stock_prods)
         pid = str(chosen["id"])
         qty = 1
-        unit_vnd = db.compute_retail_price(pid, float(chosen["price"]), overrides)
+        _, _, p_st, _ = db.get_effective_product_stock(chosen, backup_map)
+        unit_vnd = db.compute_retail_price(pid, float(chosen["price"]), overrides, primary_stock=p_st, backup_map=backup_map)
         prefixes = ["5182", "6094", "7128", "8041", "6839", "5910", "7482", "1984", "6527", "8135"]
         masked_uid = f"{random.choice(prefixes)}***{random.randint(10, 99)}"
         stats = db.get_summary_stats()
@@ -814,18 +834,19 @@ async def post_spotlight_to_channel(client: TelegramClient) -> int | None:
             return None
         products = await ps_client.sync_products(force=False)
         overrides = db.get_all_overrides()
+        backup_map = db.get_all_backup_sources()
         in_stock_prods = [
             p
             for p in products
             if not overrides.get(p["id"], {}).get("hidden")
-            and bool(p.get("inStock"))
-            and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
+            and db.get_effective_product_stock(p, backup_map)[1]
         ]
         if not in_stock_prods:
             return None
 
         chosen = random.choice(in_stock_prods)
         pid = str(chosen["id"])
+        eff_st, _, p_st, _ = db.get_effective_product_stock(chosen, backup_map)
         gift_code = db.get_setting("newbie_gift_voucher", "TANTHU10").strip().upper() or "TANTHU10"
         pricing = db.compute_order_pricing(
             product_id=pid,
@@ -834,11 +855,12 @@ async def post_spotlight_to_channel(client: TelegramClient) -> int | None:
             tier="bronze",
             voucher_code=gift_code,
             overrides=overrides,
+            primary_stock=p_st,
+            backup_map=backup_map,
         )
         base_vnd = pricing["base_unit_vnd"]
         final_vnd = pricing["total_final_vnd"]
-        st = chosen.get("stock")
-        st_txt = f"Còn {st} suất" if isinstance(st, int) else "Sẵn hàng"
+        st_txt = f"Còn {eff_st} suất" if isinstance(eff_st, int) and eff_st > 0 else "Sẵn hàng"
 
         raw_desc = localize_product_description(pid, chosen.get("description") or "", "vi")
         desc_lines = [ln.strip() for ln in raw_desc.splitlines() if ln.strip() and not ln.strip().startswith("━")]
@@ -906,6 +928,7 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True, dele
     support_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
     products = await ps_client.sync_products(force=False)
     overrides = db.get_all_overrides()
+    backup_map = db.get_all_backup_sources()
 
     in_stock_lines: list[str] = []
     for p in products:
@@ -913,12 +936,11 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True, dele
         ov = overrides.get(pid, {})
         if ov.get("hidden"):
             continue
-        in_stock = bool(p.get("inStock")) and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
-        if not in_stock:
+        eff_st, eff_in_stock, p_st, _ = db.get_effective_product_stock(p, backup_map)
+        if not eff_in_stock:
             continue
-        price_vnd = db.compute_retail_price(pid, float(p["price"]), overrides)
-        st = p.get("stock")
-        st_txt = f"Còn {st}" if isinstance(st, int) else "Sẵn hàng"
+        price_vnd = db.compute_retail_price(pid, float(p["price"]), overrides, primary_stock=p_st, backup_map=backup_map)
+        st_txt = f"Còn {eff_st}" if isinstance(eff_st, int) and eff_st > 0 else "Sẵn hàng"
         in_stock_lines.append(f"🟢 **{p['name'].strip()}** — `{price_vnd:,}đ` *({st_txt})*")
 
     now_vn_str = datetime.now(VN_TZ).strftime("%H:%M %d/%m/%Y")
@@ -1318,11 +1340,12 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
     global _LAST_KNOWN_STOCK, _LAST_AUTO_POST_HOUR_KEY, _LAST_SIM_SOCIAL_TS
     try:
         init_prods = await ps_client.sync_products(force=False)
+        init_bmap = db.get_all_backup_sources()
         for p in init_prods:
             pid = str(p.get("id", ""))
-            st = int(p.get("stock", 0) or 0) if p.get("inStock") else 0
             if pid:
-                _LAST_KNOWN_STOCK[pid] = st
+                eff_st, eff_in_stock, _, _ = db.get_effective_product_stock(p, init_bmap)
+                _LAST_KNOWN_STOCK[pid] = int(eff_st or 1) if eff_in_stock else 0
     except Exception:
         pass
 
@@ -1332,15 +1355,36 @@ async def poll_products_sync_loop(client: TelegramClient) -> None:
         await asyncio.sleep(60)
         loop_cnt += 1
         try:
+            # Đồng bộ tồn kho các nguồn API dự phòng (nếu có) mỗi 5 phút
+            if loop_cnt % 5 == 1:
+                bmap_now = db.get_all_backup_sources()
+                rate_now = float(db.get_setting("vnd_rate", "25500") or 25500.0)
+                for _, src_list in bmap_now.items():
+                    for src in src_list:
+                        if src.get("source_type") == "api" and int(src.get("active", 0) or 0) == 1:
+                            info = await ps_client.fetch_external_api_product(
+                                str(src.get("api_base_url", "")),
+                                str(src.get("api_key", "")),
+                                str(src.get("remote_product_id", "")),
+                            )
+                            if info:
+                                new_st = int(info.get("stock", 0) or 0) if info.get("inStock") else 0
+                                r_price = float(info.get("price", 0) or 0)
+                                new_cost = None
+                                if r_price > 0:
+                                    new_cost = int(round(r_price)) if r_price >= 500 else int(round(r_price * rate_now))
+                                db.update_api_backup_stock(int(src["id"]), new_st, new_cost)
+
             products = await ps_client.sync_products(force=True)
             overrides = db.get_all_overrides()
+            backup_map = db.get_all_backup_sources()
             restocked: list[dict[str, Any]] = []
             for p in products:
                 pid = str(p.get("id", ""))
                 if not pid:
                     continue
-                in_stock = bool(p.get("inStock")) and (p.get("stock") is None or int(p.get("stock", 0)) > 0)
-                cur_stock = int(p.get("stock", 1) or 1) if in_stock else 0
+                eff_st, eff_in_stock, _, _ = db.get_effective_product_stock(p, backup_map)
+                cur_stock = int(eff_st or 1) if eff_in_stock else 0
                 prev_stock = _LAST_KNOWN_STOCK.get(pid)
                 _LAST_KNOWN_STOCK[pid] = cur_stock
 
@@ -1442,18 +1486,22 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     remind_status = "🟢 Đang BẬT (sau 10p)" if remind_on else "🔴 Đang TẮT"
 
     fixed_val = vnd_int(settings.get("markup_fixed", "0"))
+    min_profit_pct = float(settings.get("min_profit_percent", "150.0") or 150.0)
+    active_src_cnt, total_backup_keys = db.get_backup_summary_stats()
     pending_cnt = stats.get("pending_deposits_count", 0)
     text = (
         "⚙️ **BẢNG ĐIỀU KHIỂN ADMIN (RESELLER PANEL)**\n\n"
         f"🏦 **Vốn bên @ProdSellerBot:** `{ps_bal_str}`\n"
         f"🔔 Cảnh báo sắp hết vốn: **Khi dưới `${low_bal_usd:.2f}`**\n"
+        f"📦 **Kho dự phòng đa nguồn:** **{active_src_cnt} nguồn** đang bật (**{total_backup_keys} key** sẵn sàng)\n"
         f"👥 Tổng khách hàng: **{stats['users_count']}** | 📦 Tổng đơn: **{stats['orders_count']}**\n"
         f"⏳ Đơn nạp đang chờ duyệt: **{pending_cnt}**\n"
         f"💰 Tổng doanh thu: **{vnd_int(stats['total_revenue']):,}đ**\n"
         f"📉 Tổng giá vốn: **{vnd_int(stats['total_cost']):,}đ**\n"
         f"💵 **Lợi nhuận ròng: +{vnd_int(stats['total_profit']):,}đ**\n\n"
-        "🔧 **Cấu hình Giá, Phễu Khách Hàng & Tự Động Đăng Kênh:**\n"
-        f"• Tăng giá tự động (Markup %): **+{settings['markup_percent']}%** (+{fixed_val:,}đ) | Tỷ giá: **$1 = {int(rate):,}đ**\n"
+        "🔧 **Cấu hình Giá Bình Ổn Đa Nguồn & Phễu Tự Động:**\n"
+        f"• Tăng giá chuẩn (Markup %): **+{settings['markup_percent']}%** (+{fixed_val:,}đ) | Tỷ giá: **$1 = {int(rate):,}đ**\n"
+        f"• 🛡️ Sàn lãi tối thiểu (Khi bù hàng nguồn khác): **>= +{min_profit_pct:g}%** *(Giữ nguyên giá nếu lãi >= {min_profit_pct:g}%)*\n"
         f"• ⏰ Tự động đăng bài Kênh theo giờ: **{autopost_status}**\n"
         f"• 🎁 Phễu Quà Tân Thủ Join Kênh: **{gift_status}**\n"
         f"• 🤖 Tạo hiệu ứng Đơn Mồi (Social Proof): **{social_status}**\n"
@@ -1474,8 +1522,12 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
             Button.inline("🔥 Đăng Bài SP Hot Ngay", b"adm:post_spotlight", style="primary"),
         ],
         [
-            Button.inline("🏷️ Chỉnh giá riêng / Ẩn-Hiện từng SP (VNĐ)", b"adm:plist:0", style="primary"),
+            Button.inline("🏷️ Quản lý SP & Nguồn Hàng Dự Phòng", b"adm:plist:0", style="primary"),
             Button.inline("🎟️ Quản lý Voucher", b"adm:vouchers", style="primary"),
+        ],
+        [
+            Button.inline(f"📈 Markup Chuẩn (+{settings['markup_percent']}%)", b"adm:set:markup_percent"),
+            Button.inline(f"🛡️ Sàn Lãi Tối Thiểu (>={min_profit_pct:g}%)", b"adm:set:min_profit_percent"),
         ],
         [
             Button.inline(f"⏰ {'Tắt' if autopost_on else 'Bật'} Auto Đăng Kênh", b"adm:tog_autopost"),
@@ -1498,8 +1550,8 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
             Button.inline("📣 Gửi thông báo (Broadcast)", b"adm:broadcast"),
         ],
         [
-            Button.inline("📈 Chỉnh % Lợi nhuận", b"adm:set:markup_percent"),
             Button.inline("➕ Chỉnh +VNĐ Cố định", b"adm:set:markup_fixed"),
+            Button.inline("💱 Đổi Tỷ giá USD->VNĐ", b"adm:set:vnd_rate"),
         ],
         [
             Button.inline("🏦 Cài Ngân hàng VietQR", b"adm:bank"),
@@ -1507,10 +1559,9 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
         ],
         [
             Button.inline("💵 Cộng/Trừ tiền khách (VNĐ)", b"adm:addbal"),
-            Button.inline("💱 Đổi Tỷ giá USD->VNĐ", b"adm:set:vnd_rate"),
+            Button.inline("🔄 Đồng bộ Kho ngay", b"adm:sync"),
         ],
         [
-            Button.inline("🔄 Đồng bộ Kho ngay", b"adm:sync"),
             Button.inline("« Về Menu Chính", b"menu:home"),
         ],
     ]
@@ -1601,6 +1652,7 @@ async def render_admin_recent_orders(event: Any) -> None:
 async def render_admin_product_list(event: Any, page: int = 0) -> None:
     products = await ps_client.sync_products(force=False)
     overrides = db.get_all_overrides()
+    backup_map = db.get_all_backup_sources()
     per_page = 10
     total = len(products)
     start = page * per_page
@@ -1610,12 +1662,14 @@ async def render_admin_product_list(event: Any, page: int = 0) -> None:
     rows: list[list[Any]] = []
     for p in sliced:
         pid = p["id"]
-        cost_vnd = db.compute_wholesale_vnd(float(p["price"]))
-        retail_vnd = db.compute_retail_price(pid, float(p["price"]), overrides)
+        _, _, p_st, b_st = db.get_effective_product_stock(p, backup_map)
+        retail_vnd = db.compute_retail_price(pid, float(p["price"]), overrides, primary_stock=p_st, backup_map=backup_map)
         ov = overrides.get(pid, {})
         hidden_icon = "🙈 " if ov.get("hidden") else ""
         custom_tag = " 📌" if ov.get("custom_price") is not None else ""
-        lbl = f"{hidden_icon}{p['name'].strip()[:18]} | Vốn:{cost_vnd:,}đ -> Bán:{retail_vnd:,}đ{custom_tag}"
+        p_st_lbl = "∞" if p_st is None else str(p_st)
+        b_tag = f" +DP:{b_st}" if b_st > 0 else ""
+        lbl = f"{hidden_icon}{p['name'].strip()[:16]} | K1:{p_st_lbl}{b_tag} | Bán:{retail_vnd:,}đ{custom_tag}"
         rows.append([Button.inline(lbl, f"adm:editp:{pid}".encode())])
 
     nav = []
@@ -1629,10 +1683,10 @@ async def render_admin_product_list(event: Any, page: int = 0) -> None:
 
     await send_or_edit(
         event,
-        f"🏷️ **QUẢN LÝ GIÁ TỪNG SẢN PHẨM (Trang {page + 1}/{(total - 1) // per_page + 1})**\n"
-        "• 📌 = Đang dùng giá bán cố định riêng (VNĐ)\n"
-        "• 🙈 = Đang ẩn khỏi danh sách của khách\n"
-        "Bấm vào sản phẩm để đặt giá bán riêng hoặc ẩn/hiện:",
+        f"🏷️ **QUẢN LÝ SẢN PHẨM & NGUỒN HÀNG DỰ PHÒNG (Trang {page + 1}/{(total - 1) // per_page + 1})**\n"
+        "• `K1` = Tồn kho chính (@ProdSellerBot) | `+DP` = Tồn kho dự phòng từ Bot/Nguồn khác\n"
+        "• 📌 = Giá cố định riêng | 🙈 = Đang ẩn\n"
+        "👉 Bấm vào sản phẩm để **Nạp Key Dự Phòng / Đấu API Bot khác** hoặc chỉnh giá:",
         buttons=rows,
     )
 
@@ -1642,34 +1696,99 @@ async def render_admin_edit_product(event: Any, product_id: str) -> None:
     if not p:
         return
     ov = db.get_product_override(product_id) or {}
+    backup_map = db.get_all_backup_sources()
+    eff_st, _, p_st, b_st = db.get_effective_product_stock(p, backup_map)
     cost_usd = float(p["price"])
-    pub_usd = float(p.get("publicPrice", cost_usd))
     cost_vnd = db.compute_wholesale_vnd(cost_usd)
-    pub_vnd = db.compute_wholesale_vnd(pub_usd)
-    retail_vnd = db.compute_retail_price(product_id, cost_usd)
+    primary_base_vnd = db.compute_primary_base_price(product_id, cost_usd)
+    alloc = db.resolve_supply_allocation(
+        product_id,
+        cost_usd,
+        qty=1,
+        primary_stock=p_st,
+        backup_map=backup_map,
+    )
+    active_cost_vnd = int(alloc["unit_cost_vnd"])
+    retail_vnd = int(alloc["base_unit_vnd"])
+    profit_vnd = retail_vnd - active_cost_vnd
+    margin_pct = (profit_vnd / active_cost_vnd * 100.0) if active_cost_vnd > 0 else 200.0
+    min_profit_pct = float(db.get_setting("min_profit_percent", "150.0") or 150.0)
     is_hidden = bool(ov.get("hidden"))
     has_custom = ov.get("custom_price") is not None
 
+    b_sources = backup_map.get(product_id, [])
+    if not b_sources:
+        b_lines = ["  • *(Chưa có nguồn dự phòng — Bấm nút bên dưới để thêm từ Bot khác)*"]
+    else:
+        b_lines = []
+        for s in b_sources:
+            sid = int(s["id"])
+            s_act = "🟢" if int(s.get("active", 0) or 0) == 1 else "🔴"
+            s_type = "Kho Key" if s.get("source_type") == "local_stock" else "API"
+            s_cost = int(s.get("cost_vnd", 0) or 0)
+            s_st = int(s.get("available_stock", 0) or 0)
+            s_stab_price = db.compute_stabilized_unit_price(primary_base_vnd, s_cost, min_profit_pct)
+            s_prof_pct = ((s_stab_price - s_cost) / s_cost * 100.0) if s_cost > 0 else 200.0
+            b_lines.append(
+                f"  {s_act} `#{sid}` **{s['source_name']}** ({s_type}) — Vốn: `{s_cost:,}đ` | Kho: **{s_st}** "
+                f"➡️ Giá bán khi bù: **`{s_stab_price:,}đ`** *(Lãi `+{s_prof_pct:.0f}%`)*"
+            )
+    b_block = "\n".join(b_lines)
+    p_st_val = 1 if p_st is None else int(p_st)
+    active_src_note = (
+        "🟢 Đang lấy từ **Kho chính @ProdSellerBot**"
+        if p_st_val > 0
+        else ("🟡 Kho chính hết hàng ➡️ **Đang tự động lấy từ Nguồn Dự Phòng!**" if b_st > 0 else "🔴 Cả kho chính & dự phòng đều đang hết hàng")
+    )
+    eff_st_lbl = "∞" if eff_st is None else str(eff_st)
+    p_st_lbl = "∞" if p_st is None else str(p_st)
+
     text = (
-        f"🏷️ **TÙY CHỈNH SẢN PHẨM**\n\n"
+        f"🏷️ **QUẢN LÝ SẢN PHẨM & ĐA NGUỒN HÀNG**\n\n"
         f"🛍️ Tên: **{p['name']}**\n"
         f"🆔 ID: `{product_id}`\n"
-        f"📉 Giá vốn đại lý của bạn: **{cost_vnd:,}đ** (`${cost_usd:.2f}`)\n"
-        f"🌐 Giá niêm yết bên @ProdSellerBot: **{pub_vnd:,}đ** (`${pub_usd:.2f}`)\n"
-        f"💰 **Giá bán lẻ hiện tại của bạn: {retail_vnd:,}đ** "
-        f"({'Giá cố định riêng 📌' if has_custom else 'Tính tự động theo % Markup'})\n"
-        f"💵 Lợi nhuận mỗi đơn: **+{retail_vnd - cost_vnd:,}đ**\n"
-        f"👁 Trạng thái hiển thị: **{'Đang ẨN 🙈' if is_hidden else 'Đang HIỆN ✅'}**"
+        f"📡 Trạng thái cấp hàng: {active_src_note}\n"
+        f"📦 Tồn kho: **Tổng `{eff_st_lbl}`** (Kho chính K1: `{p_st_lbl}` | Dự phòng: `{b_st}`)\n"
+        f"📉 Giá vốn K1 (@ProdSellerBot): **{cost_vnd:,}đ** (`${cost_usd:.2f}`)\n"
+        f"🎯 Giá chuẩn K1 (+{db.get_setting('markup_percent', '200')}%): **{primary_base_vnd:,}đ**\n"
+        f"💰 **Giá bán thực tế hiện tại (Bình ổn): `{retail_vnd:,}đ`** "
+        f"({'Giá cố định riêng 📌' if has_custom else f'Cam kết lãi >= +{min_profit_pct:g}%'})\n"
+        f"💵 Lợi nhuận trên nguồn đang chạy: **+{profit_vnd:,}đ (+{margin_pct:.0f}%)**\n"
+        f"👁 Hiển thị: **{'Đang ẨN 🙈' if is_hidden else 'Đang HIỆN ✅'}**\n\n"
+        f"📦 **DANH SÁCH NGUỒN HÀNG DỰ PHÒNG ({len(b_sources)}):**\n"
+        f"{b_block}"
     )
 
-    rows = [
-        [Button.inline("✏️ Đặt giá bán riêng (VNĐ)", f"adm:setp:{product_id}".encode(), style="primary")],
+    rows: list[list[Any]] = [
+        [
+            Button.inline("➕ Nạp Key Dự Phòng (Từ Bot khác)", f"adm:bsrc_add:{product_id}".encode(), style="success"),
+        ],
+        [
+            Button.inline("🔌 Đấu API Nguồn Phụ (Bot/Web khác)", f"adm:bsrc_api:{product_id}".encode(), style="primary"),
+        ],
+    ]
+    for s in b_sources[:6]:
+        sid = int(s["id"])
+        is_act = int(s.get("active", 0) or 0) == 1
+        rows.append([
+            Button.inline(
+                f"{'🔴 Tắt' if is_act else '🟢 Bật'} #{sid} {s['source_name'][:14]} ({s.get('available_stock', 0)})",
+                f"adm:bsrc_tog:{sid}:{product_id}".encode(),
+            ),
+            Button.inline(
+                f"🗑️ Xóa #{sid}",
+                f"adm:bsrc_del:{sid}:{product_id}".encode(),
+                style="danger",
+            ),
+        ])
+    rows.extend([
+        [Button.inline("✏️ Đặt giá bán riêng (VNĐ)", f"adm:setp:{product_id}".encode())],
         [
             Button.inline("🔄 Dùng lại công thức % chung", f"adm:resetp:{product_id}".encode()),
             Button.inline("👁 Ẩn / Hiện SP này", f"adm:hidep:{product_id}".encode()),
         ],
         [Button.inline("« Quay lại danh sách SP", b"adm:plist:0")],
-    ]
+    ])
     await send_or_edit(event, text, buttons=rows)
 
 
@@ -1918,7 +2037,8 @@ async def run_bot() -> None:
             p = await ps_client.get_product_by_id(pid, refresh=False)
             if not p:
                 return
-            max_q = int(p["stock"]) if isinstance(p.get("stock"), int) and p["stock"] > 0 else 100
+            eff_st, _, _, _ = db.get_effective_product_stock(p)
+            max_q = int(eff_st) if isinstance(eff_st, int) and eff_st > 0 else 100
             USER_AWAITING[uid] = {
                 "type": "custom_qty",
                 "product_id": pid,
@@ -2550,11 +2670,89 @@ async def run_bot() -> None:
                 await render_admin_edit_product(event, pid)
                 return
 
+            if data.startswith("adm:bsrc_add:"):
+                await event.answer()
+                pid = data.split(":", 2)[2]
+                p = await ps_client.get_product_by_id(pid, refresh=False)
+                p_name = p["name"] if p else pid
+                cost_usd = float(p["price"]) if p else 1.0
+                k1_cost = db.compute_wholesale_vnd(cost_usd)
+                k1_base = db.compute_primary_base_price(pid, cost_usd)
+                min_prof = float(db.get_setting("min_profit_percent", "150.0") or 150.0)
+                max_same_price_cost = int(k1_base // (1.0 + min_prof / 100.0))
+                USER_AWAITING[uid] = {"type": "admin_bsrc_add", "product_id": pid}
+                await send_or_edit(
+                    event,
+                    (
+                        f"➕ **NẠP KEY DỰ PHÒNG (TỪ BOT KHÁC) — `{p_name}`**\n\n"
+                        f"• Giá vốn K1 (`@ProdSellerBot`): **`{k1_cost:,}đ`** ➡️ Giá bán chuẩn (+{db.get_setting('markup_percent', '200')}%): **`{k1_base:,}đ`**\n"
+                        f"• 🛡️ **Bình ổn giá thông minh (Sàn lãi >= +{min_prof:g}%):**\n"
+                        f"  - Nếu giá vốn nguồn phụ **<= `{max_same_price_cost:,}đ`**: Giá bán giữ nguyên **`{k1_base:,}đ`** (Khách không thấy đổi giá, lãi từ `+{min_prof:g}%` đến `+200%`).\n"
+                        f"  - Nếu giá vốn nguồn phụ **> `{max_same_price_cost:,}đ`**: Hệ thống tự động nhích nhẹ giá bán để đảm bảo lãi đúng **`+{min_prof:g}%`**.\n\n"
+                        "📝 **Cú pháp nhập (Dòng 1 là Tên nguồn & Giá vốn, từ dòng 2 trở đi mỗi dòng 1 Key/Tài khoản):**\n"
+                        "```\n"
+                        "BotKho2 | 35000\n"
+                        "tk1@gmail.com|pass123\n"
+                        "tk2@gmail.com|pass456\n"
+                        "```\n"
+                        "*(Nếu trùng tên nguồn đã có của SP này, hệ thống sẽ tự động cộng dồn thêm Key vào nguồn đó)*"
+                    ),
+                    buttons=[[Button.inline("« Hủy", f"adm:editp:{pid}".encode())]],
+                )
+                return
+
+            if data.startswith("adm:bsrc_api:"):
+                await event.answer()
+                pid = data.split(":", 2)[2]
+                p = await ps_client.get_product_by_id(pid, refresh=False)
+                p_name = p["name"] if p else pid
+                USER_AWAITING[uid] = {"type": "admin_bsrc_api", "product_id": pid}
+                await send_or_edit(
+                    event,
+                    (
+                        f"🔌 **ĐẤU NỐI API NGUỒN PHỤ (BOT / WEB KHÁC) — `{p_name}`**\n\n"
+                        "Khi kho chính `@ProdSellerBot` hết hàng, hệ thống sẽ tự động gọi API sang Bot/Web phụ để lấy Key trả khách trong 2 giây!\n\n"
+                        "📝 **Nhập theo cú pháp 1 dòng:**\n"
+                        "`TÊN_NGUỒN | GIÁ_VỐN_VNĐ | BASE_URL | API_KEY | MÃ_SP_BÊN_ĐÓ`\n\n"
+                        "📌 **Ví dụ:**\n"
+                        "`BotPhuAPI | 36k | https://botphu.com | kt_live_xxx | claude_pro_1m`"
+                    ),
+                    buttons=[[Button.inline("« Hủy", f"adm:editp:{pid}".encode())]],
+                )
+                return
+
+            if data.startswith("adm:bsrc_tog:"):
+                parts = data.split(":", 3)
+                sid = int(parts[2])
+                pid = parts[3]
+                is_act = db.toggle_backup_source(sid)
+                await event.answer(f"🟢 Đã BẬT nguồn dự phòng #{sid}!" if is_act else f"🔴 Đã TẮT nguồn dự phòng #{sid}!")
+                await render_admin_edit_product(event, pid)
+                return
+
+            if data.startswith("adm:bsrc_del:"):
+                parts = data.split(":", 3)
+                sid = int(parts[2])
+                pid = parts[3]
+                db.delete_backup_source(sid)
+                await event.answer(f"🗑️ Đã xóa nguồn dự phòng #{sid}!")
+                await render_admin_edit_product(event, pid)
+                return
+
             if data.startswith("adm:set:"):
                 await event.answer()
                 setting_key = data.split(":")[2]
                 prompts = {
-                    "markup_percent": "📈 Nhập **% lợi nhuận cộng thêm** so với giá vốn (ví dụ nhập `30` để tăng +30%):",
+                    "markup_percent": (
+                        "📈 **CHỈNH % LỢI NHUẬN MỤC TIÊU (MARKUP CHUẨN)**\n\n"
+                        "Nhập **% lợi nhuận cộng thêm** so với giá vốn kho chính (ví dụ nhập `200` để định giá chênh `+200%`):"
+                    ),
+                    "min_profit_percent": (
+                        "🛡️ **CHỈNH SÀN TỶ SUẤT LỢI NHUẬN TỐI THIỂU KHI BÙ HÀNG NGUỒN KHÁC (%)**\n\n"
+                        "• Khi kho chính hết hàng và phải lấy từ nguồn dự phòng đắt hơn, Bot sẽ **giữ nguyên giá bán chuẩn** miễn là lãi vẫn đạt từ mức sàn này trở lên.\n"
+                        "• Nếu nguồn dự phòng có giá vốn cao khiến lãi tụt xuống dưới mức sàn này, Bot sẽ tự động nhích giá bán lên vừa đủ để bảo toàn mức lãi tối thiểu.\n\n"
+                        "👉 Nhập **% lợi nhuận tối thiểu bắt buộc** (ví dụ nhập `150` để cam kết lãi luôn `>= 150%`):"
+                    ),
                     "markup_fixed": "➕ Nhập **số tiền VNĐ cộng thêm cố định** trên mỗi sản phẩm (ví dụ `5000` hoặc `0`):",
                     "vnd_rate": "💱 Nhập **tỷ giá quy đổi VNĐ cho $1 USD** giá vốn (ví dụ: `25500`):",
                     "methods_text": "📖 Nhập nội dung hiển thị cho mục **Hướng dẫn (Methods)**:",
@@ -2861,6 +3059,91 @@ async def run_bot() -> None:
         if not is_admin(uid):
             return
 
+        if atype == "admin_bsrc_add":
+            pid = awaiting["product_id"]
+            lines = [ln.strip() for ln in text.splitlines() if ln.strip()]
+            if len(lines) < 2 or "|" not in lines[0]:
+                await event.respond(
+                    "❌ Sai cú pháp! Dòng 1 phải là `TÊN_NGUỒN | GIÁ_VỐN_VNĐ`, và từ dòng 2 trở đi là danh sách Key (mỗi dòng 1 Key):",
+                    buttons=[[Button.inline("« Hủy", f"adm:editp:{pid}".encode())]],
+                )
+                return
+            header_parts = [x.strip() for x in lines[0].split("|", 1)]
+            src_name = header_parts[0] or "Bot Dự Phòng"
+            try:
+                cost_vnd = parse_vnd_input(header_parts[1])
+                if cost_vnd <= 0:
+                    raise ValueError
+            except ValueError:
+                await event.respond(
+                    "❌ Giá vốn VNĐ ở dòng 1 không hợp lệ (Ví dụ: `BotKho2 | 35000` hoặc `BotKho2 | 35k`):",
+                    buttons=[[Button.inline("« Hủy", f"adm:editp:{pid}".encode())]],
+                )
+                return
+            keys_list = lines[1:]
+            USER_AWAITING.pop(uid, None)
+            src_info, added_cnt = db.add_or_append_local_backup_source(pid, src_name, cost_vnd, keys_list)
+            p = await ps_client.get_product_by_id(pid, refresh=False)
+            cost_usd = float(p["price"]) if p else (cost_vnd / 25500.0)
+            p_base_vnd = db.compute_primary_base_price(pid, cost_usd)
+            stab_price = db.compute_stabilized_unit_price(p_base_vnd, cost_vnd)
+            prof_pct = ((stab_price - cost_vnd) / cost_vnd * 100.0) if cost_vnd > 0 else 200.0
+            await event.respond(
+                f"✅ Đã nạp thành công **{added_cnt} key mới** vào nguồn **`{src_name}`** (Tổng tồn nguồn này: **{src_info.get('available_stock', 0)} key**)!\n"
+                f"📉 Giá vốn nguồn này: **`{cost_vnd:,}đ`**\n"
+                f"🛡️ Giá bán bình ổn khi cấp từ nguồn này: **`{stab_price:,}đ`** *(Lãi `+{stab_price - cost_vnd:,}đ` = `+{prof_pct:.0f}%`)*"
+            )
+            await render_admin_edit_product(event, pid)
+            return
+
+        if atype == "admin_bsrc_api":
+            pid = awaiting["product_id"]
+            parts = [x.strip() for x in text.split("|")]
+            if len(parts) < 5:
+                await event.respond(
+                    "❌ Sai cú pháp! Hãy nhập đủ 5 phần cách nhau bởi dấu `|`:\n"
+                    "`TÊN_NGUỒN | GIÁ_VỐN_VNĐ | BASE_URL | API_KEY | MÃ_SP_BÊN_ĐÓ`",
+                    buttons=[[Button.inline("« Hủy", f"adm:editp:{pid}".encode())]],
+                )
+                return
+            src_name, cost_raw, base_url, api_key, remote_pid = parts[0], parts[1], parts[2], parts[3], parts[4]
+            try:
+                cost_vnd = parse_vnd_input(cost_raw)
+                if cost_vnd <= 0:
+                    raise ValueError
+            except ValueError:
+                await event.respond(
+                    "❌ Giá vốn VNĐ không hợp lệ (ví dụ: `35000` hoặc `35k`):",
+                    buttons=[[Button.inline("« Hủy", f"adm:editp:{pid}".encode())]],
+                )
+                return
+            USER_AWAITING.pop(uid, None)
+            init_stock = 10
+            remote_info = await ps_client.fetch_external_api_product(base_url, api_key, remote_pid)
+            if remote_info:
+                init_stock = int(remote_info.get("stock", 0) or 0) if remote_info.get("inStock") else 0
+            src_info = db.add_api_backup_source(
+                product_id=pid,
+                source_name=src_name,
+                cost_vnd=cost_vnd,
+                api_base_url=base_url,
+                api_key=api_key,
+                remote_product_id=remote_pid,
+                remote_stock=init_stock,
+            )
+            p = await ps_client.get_product_by_id(pid, refresh=False)
+            cost_usd = float(p["price"]) if p else (cost_vnd / 25500.0)
+            p_base_vnd = db.compute_primary_base_price(pid, cost_usd)
+            stab_price = db.compute_stabilized_unit_price(p_base_vnd, cost_vnd)
+            prof_pct = ((stab_price - cost_vnd) / cost_vnd * 100.0) if cost_vnd > 0 else 200.0
+            await event.respond(
+                f"🔌 Đã kết nối nguồn API dự phòng **`{src_name}`** (`#{src_info.get('id', 1)}`)!\n"
+                f"📦 Tồn kho đồng bộ: **{init_stock}** | Giá vốn: **`{cost_vnd:,}đ`**\n"
+                f"🛡️ Giá bán bình ổn khi cấp từ nguồn này: **`{stab_price:,}đ`** *(Lãi `+{stab_price - cost_vnd:,}đ` = `+{prof_pct:.0f}%`)*"
+            )
+            await render_admin_edit_product(event, pid)
+            return
+
         if atype == "admin_warr_reply":
             target_uid = int(awaiting["target_uid"])
             oid = int(awaiting["order_id"])
@@ -2992,12 +3275,12 @@ async def run_bot() -> None:
             USER_AWAITING.pop(uid, None)
             db.set_product_custom_price(pid, float(new_price_vnd))
             await event.respond(f"✅ Đã đặt giá bán riêng cho `{pid}` = **{new_price_vnd:,}đ**!")
-            await render_admin_home(event, force_new=True)
+            await render_admin_edit_product(event, pid)
             return
 
         if atype == "set_setting":
             key = awaiting["key"]
-            if key in ("markup_percent", "markup_fixed", "vnd_rate", "low_balance_threshold_usd"):
+            if key in ("markup_percent", "min_profit_percent", "markup_fixed", "vnd_rate", "low_balance_threshold_usd"):
                 cleaned = text.lower().replace("%", "").replace("$", "").replace("đ", "").replace("vnd", "").replace(",", "").strip()
                 try:
                     val = float(cleaned)

@@ -252,3 +252,204 @@ class ProdSellerClient:
         )
         resp.raise_for_status()
         return resp.json()
+
+    async def fetch_external_api_product(
+        self,
+        api_base_url: str,
+        api_key: str,
+        remote_product_id: str,
+    ) -> dict[str, Any]:
+        """Lấy tồn kho và giá từ cổng Reseller API v1 của nguồn dự phòng bên ngoài."""
+        base = api_base_url.strip().rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        client = self._get_http()
+        headers = {
+            "X-API-Key": api_key.strip(),
+            "Content-Type": "application/json",
+            "User-Agent": "KingToolMultiSourceRouter/1.0",
+        }
+        resp = await client.get(f"{base}/products/{remote_product_id.strip()}", headers=headers, timeout=15.0)
+        resp.raise_for_status()
+        return resp.json()
+
+    async def create_external_api_order(
+        self,
+        api_base_url: str,
+        api_key: str,
+        remote_product_id: str,
+        quantity: int = 1,
+        email: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Mua hàng tự động từ cổng Reseller API v1 của nguồn dự phòng bên ngoài."""
+        base = api_base_url.strip().rstrip("/")
+        if not base.endswith("/v1"):
+            base = f"{base}/v1"
+        payload: dict[str, Any] = {
+            "productId": remote_product_id.strip(),
+            "quantity": quantity,
+        }
+        if email:
+            if quantity == 1:
+                payload["email"] = email.strip()
+            else:
+                payload["emails"] = [email.strip()] * quantity
+        headers = {
+            "X-API-Key": api_key.strip(),
+            "Content-Type": "application/json",
+            "User-Agent": "KingToolMultiSourceRouter/1.0",
+        }
+        if idempotency_key:
+            headers["Idempotency-Key"] = idempotency_key[:100]
+        client = self._get_http()
+        resp = await client.post(f"{base}/orders", headers=headers, json=payload, timeout=30.0)
+        data = resp.json()
+        if resp.status_code >= 400 or "error" in data:
+            err_msg = data.get("error") or f"HTTP {resp.status_code}"
+            raise RuntimeError(err_msg)
+        return data
+
+    async def fulfill_multi_source_order(
+        self,
+        db: Any,
+        product: dict[str, Any],
+        quantity: int = 1,
+        email: str | None = None,
+        idempotency_key: str | None = None,
+    ) -> dict[str, Any]:
+        """Định tuyến lấy hàng Đa Nguồn (Multi-Source Failover):
+        1. Ưu tiên lấy từ Nguồn 1 (@ProdSellerBot) nếu còn hàng.
+        2. Nếu Nguồn 1 hết hàng, thiếu số lượng hoặc gặp lỗi API đột xuất, tự động chuyển sang
+           rút Key từ các Nguồn Dự Phòng (Kho Key nội bộ hoặc API nguồn phụ, ưu tiên giá vốn rẻ nhất).
+        """
+        pid = str(product["id"])
+        qty = max(1, int(quantity))
+        unit_cost_usd = float(product.get("price", 0.0) or 0.0)
+        primary_unit_cost_vnd = db.compute_wholesale_vnd(unit_cost_usd)
+
+        _, _, primary_stock, _ = db.get_effective_product_stock(product)
+        want_primary = qty if primary_stock is None else min(qty, max(0, primary_stock))
+
+        all_keys: list[str] = []
+        total_actual_cost_vnd = 0
+        source_parts: list[str] = []
+        ps_order_id = ""
+        final_status = "delivered"
+        used_backup = False
+        last_primary_err: Exception | None = None
+
+        rem_qty = qty
+
+        # Bước 1: Thử lấy từ Nguồn 1 (@ProdSellerBot) nếu Nguồn 1 báo còn hàng
+        if want_primary > 0:
+            try:
+                p_resp = await self.create_order(
+                    product_id=pid,
+                    quantity=want_primary,
+                    email=email,
+                    idempotency_key=idempotency_key,
+                )
+                p_keys: list[str] = []
+                if p_resp.get("deliveredKeys"):
+                    p_keys = [str(k) for k in p_resp["deliveredKeys"]]
+                elif p_resp.get("deliveredKey"):
+                    p_keys = [str(p_resp["deliveredKey"])]
+
+                ps_order_id = str(p_resp.get("orderId", ""))
+                p_status = str(p_resp.get("status", "delivered"))
+                p_amt_usd = float(p_resp.get("amount", unit_cost_usd * want_primary))
+                p_cost_vnd = db.compute_wholesale_vnd(p_amt_usd)
+
+                all_keys.extend(p_keys)
+                total_actual_cost_vnd += p_cost_vnd
+                source_parts.append(f"ProdSeller (x{want_primary})")
+                if p_status == "paid" and not p_keys:
+                    final_status = "paid"
+                    rem_qty -= want_primary
+                else:
+                    rem_qty -= len(p_keys) if p_keys else want_primary
+            except Exception as exc:
+                last_primary_err = exc
+                logging.warning("Nguồn 1 ProdSeller lỗi khi mua %s (x%s), chuyển sang Nguồn Dự Phòng: %s", pid, want_primary, exc)
+
+        # Bước 2: Bù số lượng còn thiếu từ các Nguồn Dự Phòng (ưu tiên giá vốn thấp nhất trước)
+        popped_rollback_log: list[tuple[int, list[str]]] = []
+        if rem_qty > 0:
+            backup_sources = [
+                s
+                for s in db.get_product_backup_sources(pid)
+                if int(s.get("active", 0) or 0) == 1 and int(s.get("available_stock", 0) or 0) > 0
+            ]
+            for b_src in backup_sources:
+                if rem_qty <= 0:
+                    break
+                sid = int(b_src["id"])
+                sname = str(b_src["source_name"])
+                stype = str(b_src.get("source_type", "local_stock") or "local_stock")
+                b_cost_vnd = int(b_src["cost_vnd"])
+                avail = max(0, int(b_src.get("available_stock", 0) or 0))
+                take_b = min(rem_qty, avail)
+                if take_b <= 0:
+                    continue
+
+                if stype == "local_stock":
+                    popped = db.pop_backup_keys_atomic(sid, take_b)
+                    if popped:
+                        used_backup = True
+                        popped_rollback_log.append((sid, popped))
+                        all_keys.extend(popped)
+                        total_actual_cost_vnd += len(popped) * b_cost_vnd
+                        source_parts.append(f"{sname} (x{len(popped)})")
+                        rem_qty -= len(popped)
+                elif stype == "api":
+                    try:
+                        ext_idem = f"{idempotency_key or 'ext'}_b{sid}"
+                        ext_resp = await self.create_external_api_order(
+                            api_base_url=str(b_src.get("api_base_url", "")),
+                            api_key=str(b_src.get("api_key", "")),
+                            remote_product_id=str(b_src.get("remote_product_id", "")),
+                            quantity=take_b,
+                            email=email,
+                            idempotency_key=ext_idem,
+                        )
+                        ext_keys: list[str] = []
+                        if ext_resp.get("deliveredKeys"):
+                            ext_keys = [str(k) for k in ext_resp["deliveredKeys"]]
+                        elif ext_resp.get("deliveredKey"):
+                            ext_keys = [str(ext_resp["deliveredKey"])]
+                        got_cnt = len(ext_keys) if ext_keys else take_b
+                        used_backup = True
+                        all_keys.extend(ext_keys)
+                        total_actual_cost_vnd += got_cnt * b_cost_vnd
+                        source_parts.append(f"{sname} [API] (x{got_cnt})")
+                        rem_qty -= got_cnt
+                        new_rem_stock = max(0, avail - got_cnt)
+                        db.update_api_backup_stock(sid, new_rem_stock)
+                        if not ps_order_id and ext_resp.get("orderId"):
+                            ps_order_id = f"EXT_{sid}_{ext_resp['orderId']}"
+                    except Exception as ext_exc:
+                        logging.warning("Nguồn API dự phòng %s (#%s) lỗi: %s", sname, sid, ext_exc)
+
+        if rem_qty > 0:
+            # Nếu chưa mua được gì từ ProdSeller mà kho dự phòng cũng không đủ -> trả lại key dự phòng vào kho và báo lỗi
+            if len(all_keys) == sum(len(klist) for _, klist in popped_rollback_log):
+                for sid, klist in popped_rollback_log:
+                    db.restore_backup_keys(sid, klist)
+                if last_primary_err is not None:
+                    raise RuntimeError(str(last_primary_err))
+                raise RuntimeError("Kho hàng chính và kho dự phòng hiện không đủ số lượng yêu cầu.")
+
+        if not ps_order_id:
+            ps_order_id = f"BACKUP_{int(time.time())}"
+
+        return {
+            "deliveredKeys": all_keys,
+            "deliveredKey": all_keys[0] if all_keys else "",
+            "orderId": ps_order_id,
+            "status": final_status,
+            "actual_cost_vnd": total_actual_cost_vnd or (primary_unit_cost_vnd * qty),
+            "source_summary": " + ".join(source_parts) if source_parts else "ProdSeller",
+            "used_backup": used_backup,
+        }
+

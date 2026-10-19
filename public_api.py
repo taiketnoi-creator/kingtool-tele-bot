@@ -508,6 +508,7 @@ async def handle_http_request(
             if path == "/v1/products" and method == "GET":
                 products = await ps_client.sync_products(force=False)
                 overrides = db.get_all_overrides()
+                backup_map = db.get_all_backup_sources()
                 out_list: list[dict[str, Any]] = []
                 for p in products:
                     pid = str(p["id"])
@@ -515,7 +516,10 @@ async def handle_http_request(
                     if ov and ov.get("hidden"):
                         continue
                     w_usd = float(p.get("price", 0.0) or 0.0)
-                    base_vnd, vip_vnd, _ = db.compute_tier_unit_price(pid, w_usd, tier, overrides)
+                    total_stock, eff_in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
+                    base_vnd, vip_vnd, _ = db.compute_tier_unit_price(
+                        pid, w_usd, tier, overrides, primary_stock=primary_stock, backup_map=backup_map
+                    )
                     out_list.append(
                         {
                             "id": pid,
@@ -524,8 +528,8 @@ async def handle_http_request(
                             "price": vip_vnd,
                             "publicPrice": base_vnd,
                             "currency": "VND",
-                            "stock": p.get("stock"),
-                            "inStock": bool(p.get("inStock", False)),
+                            "stock": total_stock,
+                            "inStock": eff_in_stock,
                             "requiresEmailActivation": bool(p.get("requiresEmailActivation", False)),
                             "delivery": p.get("delivery") or {"type": "instant"},
                         }
@@ -545,8 +549,12 @@ async def handle_http_request(
                 if not p:
                     await _send_json(writer, 404, {"error": "Product not found"})
                     return
+                backup_map = db.get_all_backup_sources()
+                total_stock, eff_in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
                 w_usd = float(p.get("price", 0.0) or 0.0)
-                base_vnd, vip_vnd, _ = db.compute_tier_unit_price(pid, w_usd, tier, overrides)
+                base_vnd, vip_vnd, _ = db.compute_tier_unit_price(
+                    pid, w_usd, tier, overrides, primary_stock=primary_stock, backup_map=backup_map
+                )
                 await _send_json(
                     writer,
                     200,
@@ -557,8 +565,8 @@ async def handle_http_request(
                         "price": vip_vnd,
                         "publicPrice": base_vnd,
                         "currency": "VND",
-                        "stock": p.get("stock"),
-                        "inStock": bool(p.get("inStock", False)),
+                        "stock": total_stock,
+                        "inStock": eff_in_stock,
                         "requiresEmailActivation": bool(p.get("requiresEmailActivation", False)),
                         "delivery": p.get("delivery") or {"type": "instant"},
                     },
@@ -650,7 +658,9 @@ async def handle_http_request(
                     if not p:
                         await _send_json(writer, 404, {"error": "Product not found"})
                         return
-                    if not p.get("inStock", False) or (isinstance(p.get("stock"), int) and p["stock"] < qty):
+                    backup_map = db.get_all_backup_sources()
+                    total_stock, eff_in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
+                    if not eff_in_stock or (isinstance(total_stock, int) and total_stock < qty):
                         await _send_json(writer, 409, {"error": "Out of stock or insufficient stock quantity"})
                         return
 
@@ -676,6 +686,8 @@ async def handle_http_request(
                         voucher_code=None,
                         user_id=uid,
                         overrides=overrides,
+                        primary_stock=primary_stock,
+                        backup_map=backup_map,
                     )
                     total_retail_vnd = int(pricing["total_final_vnd"])
                     total_cost_vnd = int(pricing["total_cost_vnd"])
@@ -700,8 +712,9 @@ async def handle_http_request(
 
                     ps_idem = f"api_{uid}_{product_id}_{qty}_{int(time.time())}"
                     try:
-                        order_data = await ps_client.create_order(
-                            product_id=product_id,
+                        order_data = await ps_client.fulfill_multi_source_order(
+                            db=db,
+                            product=p,
                             quantity=qty,
                             email=email_str or None,
                             idempotency_key=ps_idem,
@@ -719,6 +732,8 @@ async def handle_http_request(
 
                     status = order_data.get("status", "delivered" if keys else "paid")
                     ps_order_id = str(order_data.get("orderId", ""))
+                    actual_cost_vnd = int(order_data.get("actual_cost_vnd", total_cost_vnd))
+                    src_summary = str(order_data.get("source_summary", "ProdSeller"))
 
                     local_order_id = db.create_order_record(
                         user_id=uid,
@@ -726,7 +741,7 @@ async def handle_http_request(
                         product_id=product_id,
                         product_name=p["name"],
                         quantity=qty,
-                        wholesale_cost=float(total_cost_vnd),
+                        wholesale_cost=float(actual_cost_vnd),
                         retail_price=float(total_retail_vnd),
                         prodseller_order_id=ps_order_id,
                         status=status,
@@ -758,7 +773,8 @@ async def handle_http_request(
 
                     # Báo đơn hàng API mới về Telegram cho Admin
                     if bot_client and admin_ids:
-                        profit_vnd = total_retail_vnd - total_cost_vnd
+                        profit_vnd = total_retail_vnd - actual_cost_vnd
+                        profit_pct = (profit_vnd / actual_cost_vnd * 100.0) if actual_cost_vnd > 0 else 0.0
                         for adm_id in admin_ids:
                             try:
                                 asyncio.create_task(
@@ -768,8 +784,9 @@ async def handle_http_request(
                                             f"🔌 **ĐƠN HÀNG QUA API #{local_order_id}**\n\n"
                                             f"👤 Đại lý: `{uid}` (@{user.get('username') or 'user'})\n"
                                             f"🛍️ Sản phẩm: **{p['name']}** (x{qty})\n"
-                                            f"💵 Thu đại lý: **{total_retail_vnd:,}đ** | Giá vốn: **{total_cost_vnd:,}đ**\n"
-                                            f"📈 Lợi nhuận ròng: **+{profit_vnd:,}đ**"
+                                            f"📦 Nguồn xuất hàng: **{src_summary}**\n"
+                                            f"💵 Thu đại lý: **{total_retail_vnd:,}đ** | Giá vốn: **{actual_cost_vnd:,}đ**\n"
+                                            f"📈 **Lợi nhuận ròng: +{profit_vnd:,}đ (+{profit_pct:.0f}%)**"
                                         ),
                                     )
                                 )

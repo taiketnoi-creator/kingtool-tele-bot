@@ -29,7 +29,8 @@ VN_TZ = timezone(timedelta(hours=7))
 logger = logging.getLogger("reseller_bot.db")
 
 DEFAULT_SETTINGS: dict[str, str] = {
-    "markup_percent": "25.0",            # Mặc định tăng +25% so với giá vốn ProdSeller
+    "markup_percent": "200.0",           # Mặc định chênh lệch mục tiêu +200% so với giá vốn Nguồn 1
+    "min_profit_percent": "150.0",       # Sàn tỷ suất lợi nhuận tối thiểu bắt buộc (>= 150%) khi bình ổn giá sang nguồn dự phòng
     "markup_fixed": "0",                 # Cộng thêm VNĐ cố định
     "vnd_rate": "25500",                 # Tỷ giá 1 USD = 25,500 VNĐ
     "bank_id": "MB",                     # Mã ngân hàng VietQR (MB, VCB, TCB, ACB, BIDV, ICB...)
@@ -69,7 +70,7 @@ TIER_DISCOUNTS: dict[str, int] = {
 }
 
 _TABLE_NAME_RE = re.compile(
-    r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders|vouchers|voucher_usages|api_keys)\b(?![.'\"_])"
+    r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders|vouchers|voucher_usages|api_keys|backup_sources)\b(?![.'\"_])"
 )
 
 
@@ -122,6 +123,8 @@ class Database:
         self._overrides_cache_ts: float = 0.0
         self._vouchers_cache: dict[str, dict[str, Any]] | None = None
         self._vouchers_cache_ts: float = 0.0
+        self._backup_sources_cache: dict[str, list[dict[str, Any]]] | None = None
+        self._backup_sources_cache_ts: float = 0.0
         self._users_cache: dict[int, tuple[float, dict[str, Any]]] = {}
         self._api_keys_by_user: dict[int, tuple[float, dict[str, Any]]] = {}
         self._api_keys_by_token: dict[str, tuple[float, int]] = {}
@@ -311,6 +314,21 @@ class Database:
                         active INTEGER NOT NULL DEFAULT 1,
                         created_at TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS backup_sources (
+                        id BIGSERIAL PRIMARY KEY,
+                        product_id TEXT NOT NULL,
+                        source_name TEXT NOT NULL DEFAULT 'Nguồn dự phòng',
+                        source_type TEXT NOT NULL DEFAULT 'local_stock',
+                        cost_vnd NUMERIC(18, 2) NOT NULL DEFAULT 0,
+                        stock_keys TEXT NOT NULL DEFAULT '[]',
+                        api_base_url TEXT NOT NULL DEFAULT '',
+                        api_key TEXT NOT NULL DEFAULT '',
+                        remote_product_id TEXT NOT NULL DEFAULT '',
+                        remote_stock INTEGER NOT NULL DEFAULT 0,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL
+                    );
                     """
                 )
                 for k, v in DEFAULT_SETTINGS.items():
@@ -411,6 +429,21 @@ class Database:
                         user_id INTEGER PRIMARY KEY,
                         api_key TEXT NOT NULL UNIQUE,
                         total_requests INTEGER NOT NULL DEFAULT 0,
+                        active INTEGER NOT NULL DEFAULT 1,
+                        created_at TEXT NOT NULL
+                    );
+
+                    CREATE TABLE IF NOT EXISTS backup_sources (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        product_id TEXT NOT NULL,
+                        source_name TEXT NOT NULL DEFAULT 'Nguồn dự phòng',
+                        source_type TEXT NOT NULL DEFAULT 'local_stock',
+                        cost_vnd REAL NOT NULL DEFAULT 0,
+                        stock_keys TEXT NOT NULL DEFAULT '[]',
+                        api_base_url TEXT NOT NULL DEFAULT '',
+                        api_key TEXT NOT NULL DEFAULT '',
+                        remote_product_id TEXT NOT NULL DEFAULT '',
+                        remote_stock INTEGER NOT NULL DEFAULT 0,
                         active INTEGER NOT NULL DEFAULT 1,
                         created_at TEXT NOT NULL
                     );
@@ -820,27 +853,492 @@ class Database:
         self._overrides_cache = None
         return bool(new_val)
 
+    @staticmethod
+    def _round_nice_vnd(raw_val: float) -> int:
+        if raw_val < 5000:
+            return max(500, int(round(raw_val / 500.0) * 500))
+        return int(round(raw_val / 1000.0) * 1000)
+
     def compute_wholesale_vnd(self, wholesale_usd: float) -> int:
         rate = float(self.get_setting("vnd_rate", "25500") or 25500.0)
         return int(round(wholesale_usd * rate))
 
-    def compute_retail_price(self, product_id: str, wholesale_usd: float, overrides: dict[str, dict[str, Any]] | None = None) -> int:
-        """Tính giá bán lẻ niêm yết bằng VNĐ (đ)."""
+    # --- Backup Supply Sources (Đa Nguồn Hàng Dự Phòng + RAM Cache 60s) ---
+    @staticmethod
+    def _parse_stock_keys(raw: Any) -> list[str]:
+        if isinstance(raw, list):
+            return [str(k).strip() for k in raw if str(k).strip()]
+        if isinstance(raw, str) and raw.strip():
+            try:
+                parsed = json.loads(raw)
+                if isinstance(parsed, list):
+                    return [str(k).strip() for k in parsed if str(k).strip()]
+            except Exception:
+                pass
+        return []
+
+    def get_all_backup_sources(self) -> dict[str, list[dict[str, Any]]]:
+        """Lấy toàn bộ nguồn hàng dự phòng theo từng product_id (RAM Cache 60s, sắp xếp giá vốn rẻ nhất trước)."""
+        import time
+
+        now = time.monotonic()
+        if self._backup_sources_cache is not None and (now - self._backup_sources_cache_ts < 60.0):
+            return {pid: [dict(item) for item in items] for pid, items in self._backup_sources_cache.items()}
+
+        with self._conn() as conn:
+            rows = conn.execute(
+                "SELECT * FROM backup_sources ORDER BY cost_vnd ASC, id ASC"
+            ).fetchall()
+            grouped: dict[str, list[dict[str, Any]]] = {}
+            for r in rows:
+                d = dict(r)
+                pid = str(d.get("product_id", ""))
+                keys = self._parse_stock_keys(d.get("stock_keys", "[]"))
+                d["stock_keys_list"] = keys
+                stype = str(d.get("source_type", "local_stock") or "local_stock")
+                d["cost_vnd"] = int(round(float(d.get("cost_vnd", 0) or 0)))
+                if stype == "api":
+                    d["available_stock"] = max(0, int(d.get("remote_stock", 0) or 0))
+                else:
+                    d["available_stock"] = len(keys)
+                grouped.setdefault(pid, []).append(d)
+
+            self._backup_sources_cache = grouped
+            self._backup_sources_cache_ts = now
+            return {pid: [dict(item) for item in items] for pid, items in grouped.items()}
+
+    def get_product_backup_sources(
+        self,
+        product_id: str,
+        backup_map: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> list[dict[str, Any]]:
+        bmap = backup_map if backup_map is not None else self.get_all_backup_sources()
+        return bmap.get(str(product_id), [])
+
+    def get_backup_stock_count(
+        self,
+        product_id: str,
+        backup_map: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> int:
+        sources = self.get_product_backup_sources(product_id, backup_map)
+        total = 0
+        for s in sources:
+            if int(s.get("active", 0) or 0) == 1:
+                total += max(0, int(s.get("available_stock", 0) or 0))
+        return total
+
+    def get_backup_summary_stats(self) -> tuple[int, int]:
+        """Trả về (tổng_nguồn_đang_bật, tổng_key_dự_phòng_sẵn_sàng)."""
+        bmap = self.get_all_backup_sources()
+        active_src_cnt = 0
+        total_keys = 0
+        for items in bmap.values():
+            for s in items:
+                if int(s.get("active", 0) or 0) == 1:
+                    active_src_cnt += 1
+                    total_keys += max(0, int(s.get("available_stock", 0) or 0))
+        return active_src_cnt, total_keys
+
+    def get_effective_product_stock(
+        self,
+        product: dict[str, Any],
+        backup_map: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> tuple[int | None, bool, int | None, int]:
+        """Tính tổng tồn kho gộp (Nguồn 1 ProdSeller + Các Nguồn Dự Phòng).
+        Trả về: (total_stock, in_stock, primary_stock, backup_stock).
+        """
+        pid = str(product.get("id", ""))
+        raw_in_stock = bool(product.get("inStock"))
+        raw_stock = product.get("stock")
+        if not raw_in_stock or (isinstance(raw_stock, int) and raw_stock <= 0):
+            primary_stock: int | None = 0
+        elif isinstance(raw_stock, int):
+            primary_stock = max(0, raw_stock)
+        else:
+            primary_stock = None
+
+        backup_stock = self.get_backup_stock_count(pid, backup_map)
+        if primary_stock is None:
+            return None, True, None, backup_stock
+        total_stock = primary_stock + backup_stock
+        return total_stock, (total_stock > 0), primary_stock, backup_stock
+
+    def add_or_append_local_backup_source(
+        self,
+        product_id: str,
+        source_name: str,
+        cost_vnd: int,
+        new_keys: list[str],
+    ) -> tuple[dict[str, Any], int]:
+        """Thêm mới hoặc nạp bồi thêm Key/Tài khoản vào Kho Dự Phòng của 1 sản phẩm.
+        Trả về (source_dict, số_key_mới_đã_thêm).
+        """
+        pid = str(product_id).strip()
+        sname = (source_name or "Kho Dự Phòng").strip()
+        c_vnd = max(500, int(round(float(cost_vnd))))
+        clean_new = [k.strip() for k in new_keys if k.strip()]
+
+        with self._conn() as conn:
+            existing = conn.execute(
+                """
+                SELECT * FROM backup_sources
+                WHERE product_id = ? AND LOWER(source_name) = LOWER(?) AND source_type = 'local_stock'
+                ORDER BY id ASC LIMIT 1
+                """,
+                (pid, sname),
+            ).fetchone()
+
+            if existing:
+                sid = int(existing["id"])
+                cur_keys = self._parse_stock_keys(existing["stock_keys"])
+                cur_set = set(cur_keys)
+                added_cnt = 0
+                for k in clean_new:
+                    if k not in cur_set:
+                        cur_keys.append(k)
+                        cur_set.add(k)
+                        added_cnt += 1
+                conn.execute(
+                    """
+                    UPDATE backup_sources
+                    SET cost_vnd = ?, stock_keys = ?, active = 1
+                    WHERE id = ?
+                    """,
+                    (c_vnd, json.dumps(cur_keys, ensure_ascii=False), sid),
+                )
+            else:
+                dedup_keys: list[str] = []
+                seen: set[str] = set()
+                for k in clean_new:
+                    if k not in seen:
+                        dedup_keys.append(k)
+                        seen.add(k)
+                added_cnt = len(dedup_keys)
+                conn.execute(
+                    """
+                    INSERT INTO backup_sources (
+                        product_id, source_name, source_type, cost_vnd,
+                        stock_keys, active, created_at
+                    ) VALUES (?, ?, 'local_stock', ?, ?, 1, ?)
+                    """,
+                    (pid, sname, c_vnd, json.dumps(dedup_keys, ensure_ascii=False), now_str()),
+                )
+
+        self._backup_sources_cache = None
+        sources = self.get_product_backup_sources(pid)
+        matched = next(
+            (s for s in sources if s["source_name"].lower() == sname.lower() and s["source_type"] == "local_stock"),
+            sources[-1] if sources else {},
+        )
+        return matched, added_cnt
+
+    def add_api_backup_source(
+        self,
+        product_id: str,
+        source_name: str,
+        cost_vnd: int,
+        api_base_url: str,
+        api_key: str,
+        remote_product_id: str,
+        remote_stock: int = 10,
+    ) -> dict[str, Any]:
+        """Đấu nối thêm 1 Bot/Web Reseller API khác làm nguồn dự phòng tự động."""
+        pid = str(product_id).strip()
+        sname = (source_name or "API Dự Phòng").strip()
+        c_vnd = max(500, int(round(float(cost_vnd))))
+        b_url = api_base_url.strip().rstrip("/")
+        akey = api_key.strip()
+        r_pid = remote_product_id.strip()
+        r_stock = max(0, int(remote_stock))
+
+        with self._conn() as conn:
+            existing = conn.execute(
+                """
+                SELECT id FROM backup_sources
+                WHERE product_id = ? AND LOWER(source_name) = LOWER(?) AND source_type = 'api'
+                LIMIT 1
+                """,
+                (pid, sname),
+            ).fetchone()
+            if existing:
+                conn.execute(
+                    """
+                    UPDATE backup_sources
+                    SET cost_vnd = ?, api_base_url = ?, api_key = ?, remote_product_id = ?, remote_stock = ?, active = 1
+                    WHERE id = ?
+                    """,
+                    (c_vnd, b_url, akey, r_pid, r_stock, int(existing["id"])),
+                )
+            else:
+                conn.execute(
+                    """
+                    INSERT INTO backup_sources (
+                        product_id, source_name, source_type, cost_vnd,
+                        stock_keys, api_base_url, api_key, remote_product_id, remote_stock, active, created_at
+                    ) VALUES (?, ?, 'api', ?, '[]', ?, ?, ?, ?, 1, ?)
+                    """,
+                    (pid, sname, c_vnd, b_url, akey, r_pid, r_stock, now_str()),
+                )
+
+        self._backup_sources_cache = None
+        sources = self.get_product_backup_sources(pid)
+        return next(
+            (s for s in sources if s["source_name"].lower() == sname.lower() and s["source_type"] == "api"),
+            sources[-1] if sources else {},
+        )
+
+    def update_api_backup_stock(self, source_id: int, remote_stock: int, cost_vnd: int | None = None) -> None:
+        with self._conn() as conn:
+            if cost_vnd is not None and cost_vnd > 0:
+                conn.execute(
+                    "UPDATE backup_sources SET remote_stock = ?, cost_vnd = ? WHERE id = ?",
+                    (max(0, int(remote_stock)), int(cost_vnd), int(source_id)),
+                )
+            else:
+                conn.execute(
+                    "UPDATE backup_sources SET remote_stock = ? WHERE id = ?",
+                    (max(0, int(remote_stock)), int(source_id)),
+                )
+        self._backup_sources_cache = None
+
+    def toggle_backup_source(self, source_id: int) -> bool:
+        with self._conn() as conn:
+            row = conn.execute("SELECT active FROM backup_sources WHERE id = ?", (int(source_id),)).fetchone()
+            if not row:
+                return False
+            new_val = 0 if int(row["active"] or 0) == 1 else 1
+            conn.execute("UPDATE backup_sources SET active = ? WHERE id = ?", (new_val, int(source_id)))
+        self._backup_sources_cache = None
+        return bool(new_val)
+
+    def delete_backup_source(self, source_id: int) -> bool:
+        with self._conn() as conn:
+            cur = conn.execute("DELETE FROM backup_sources WHERE id = ?", (int(source_id),))
+            deleted = cur.rowcount > 0
+        self._backup_sources_cache = None
+        return deleted
+
+    def pop_backup_keys_atomic(self, source_id: int, qty: int) -> list[str]:
+        """Rút nguyên tử `qty` Key/Tài khoản từ Kho Dự Phòng `source_id`."""
+        need = max(1, int(qty))
+        with self._conn() as conn:
+            row = conn.execute(
+                "SELECT stock_keys, active FROM backup_sources WHERE id = ?",
+                (int(source_id),),
+            ).fetchone()
+            if not row or int(row["active"] or 0) != 1:
+                return []
+            keys = self._parse_stock_keys(row["stock_keys"])
+            if not keys:
+                return []
+            taken = keys[:need]
+            remaining = keys[need:]
+            conn.execute(
+                "UPDATE backup_sources SET stock_keys = ? WHERE id = ?",
+                (json.dumps(remaining, ensure_ascii=False), int(source_id)),
+            )
+        self._backup_sources_cache = None
+        return taken
+
+    def restore_backup_keys(self, source_id: int, keys_to_restore: list[str]) -> None:
+        if not keys_to_restore:
+            return
+        with self._conn() as conn:
+            row = conn.execute("SELECT stock_keys FROM backup_sources WHERE id = ?", (int(source_id),)).fetchone()
+            if not row:
+                return
+            cur_keys = self._parse_stock_keys(row["stock_keys"])
+            merged = list(keys_to_restore) + [k for k in cur_keys if k not in keys_to_restore]
+            conn.execute(
+                "UPDATE backup_sources SET stock_keys = ? WHERE id = ?",
+                (json.dumps(merged, ensure_ascii=False), int(source_id)),
+            )
+        self._backup_sources_cache = None
+
+    # --- Bình Ổn Giá Thông Minh (Markup 200% + Khóa Sàn Lợi Nhuận Tối Thiểu >= 150%) ---
+    def compute_primary_base_price(
+        self,
+        product_id: str,
+        wholesale_usd: float,
+        overrides: dict[str, dict[str, Any]] | None = None,
+    ) -> int:
+        """Tính Giá Bán Lẻ Bình Ổn Chuẩn theo Nguồn 1 (@ProdSellerBot)."""
         rate = float(self.get_setting("vnd_rate", "25500") or 25500.0)
         ov = (overrides or {}).get(product_id) if overrides is not None else self.get_product_override(product_id)
         if ov and ov.get("custom_price") is not None:
             cp = float(ov["custom_price"])
             return int(round(cp * rate)) if cp < 500 else int(round(cp))
 
-        pct = float(self.get_setting("markup_percent", "25.0") or 0.0)
+        pct = float(self.get_setting("markup_percent", "200.0") or 0.0)
         fixed_vnd = float(self.get_setting("markup_fixed", "0") or 0.0)
+        min_profit_pct = float(self.get_setting("min_profit_percent", "150.0") or 0.0)
+        effective_pct = max(pct, min_profit_pct)
 
         cost_vnd = wholesale_usd * rate
-        raw_retail = cost_vnd * (1.0 + pct / 100.0) + fixed_vnd
+        raw_retail = cost_vnd * (1.0 + effective_pct / 100.0) + fixed_vnd
         raw_retail = max(cost_vnd, raw_retail)
-        if raw_retail < 5000:
-            return max(500, int(round(raw_retail / 500.0) * 500))
-        return int(round(raw_retail / 1000.0) * 1000)
+        return self._round_nice_vnd(raw_retail)
+
+    def compute_stabilized_unit_price(
+        self,
+        primary_base_vnd: int,
+        active_cost_vnd: int,
+        min_profit_pct: float | None = None,
+    ) -> int:
+        """Tính giá bán bình ổn khi lấy hàng từ nguồn có giá vốn `active_cost_vnd`:
+        - Ưu tiên GIỮ NGUYÊN giá chuẩn `primary_base_vnd` của Nguồn 1 để khách không thấy nhảy giá.
+        - 🛡️ Khóa Sàn Lợi Nhuận Tối Thiểu (`min_profit_percent`, mặc định 150%):
+          Nếu nguồn dự phòng có giá vốn cao khiến lãi tại mức `primary_base_vnd` tụt xuống dưới 150%,
+          tự động nâng nhẹ giá bán lên đúng ngưỡng `active_cost_vnd * (1 + min_profit_pct/100)` để đảm bảo
+          tỷ suất lợi nhuận KHÔNG BAO GIỜ thấp hơn 150%!
+        """
+        if min_profit_pct is None:
+            min_profit_pct = float(self.get_setting("min_profit_percent", "150.0") or 0.0)
+        floor_raw = active_cost_vnd * (1.0 + max(0.0, min_profit_pct) / 100.0)
+        floor_vnd = self._round_nice_vnd(floor_raw)
+        return max(primary_base_vnd, floor_vnd, active_cost_vnd)
+
+    def resolve_supply_allocation(
+        self,
+        product_id: str,
+        wholesale_usd: float,
+        qty: int = 1,
+        primary_stock: int | None = None,
+        overrides: dict[str, dict[str, Any]] | None = None,
+        backup_map: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> dict[str, Any]:
+        """Định tuyến nguồn hàng & tính giá bình ổn cho số lượng `qty`:
+        1. Ưu tiên lấy từ Nguồn 1 (ProdSeller) nếu còn hàng.
+        2. Nếu Nguồn 1 hết hàng hoặc thiếu số lượng, tự động bù phần thiếu từ các Nguồn Dự Phòng
+           đang bật và còn hàng (ưu tiên nguồn có giá vốn rẻ nhất trước).
+        3. Áp dụng công thức Bình Ổn Giá + Khóa Sàn Lãi Tối Thiểu (`>= min_profit_percent`, VD: 150%).
+        """
+        qty = max(1, int(qty))
+        primary_cost_vnd = self.compute_wholesale_vnd(wholesale_usd)
+        primary_base_vnd = self.compute_primary_base_price(product_id, wholesale_usd, overrides)
+        min_profit_pct = float(self.get_setting("min_profit_percent", "150.0") or 0.0)
+
+        active_backups = [
+            s
+            for s in self.get_product_backup_sources(product_id, backup_map)
+            if int(s.get("active", 0) or 0) == 1 and int(s.get("available_stock", 0) or 0) > 0
+        ]
+
+        # Nếu caller không truyền primary_stock, mặc định lấy Nguồn 1 trừ khi Nguồn 1 = 0
+        if primary_stock is None:
+            take_primary = qty
+        else:
+            take_primary = min(qty, max(0, int(primary_stock)))
+
+        rem = qty - take_primary
+        allocations: list[dict[str, Any]] = []
+        if take_primary > 0:
+            p_unit_price = self.compute_stabilized_unit_price(primary_base_vnd, primary_cost_vnd, min_profit_pct)
+            allocations.append(
+                {
+                    "source_type": "primary",
+                    "source_id": 0,
+                    "source_name": "ProdSeller",
+                    "qty": take_primary,
+                    "unit_cost_vnd": primary_cost_vnd,
+                    "unit_base_vnd": p_unit_price,
+                }
+            )
+
+        used_backup = False
+        for b_src in active_backups:
+            if rem <= 0:
+                break
+            avail = max(0, int(b_src.get("available_stock", 0) or 0))
+            take_b = min(rem, avail)
+            if take_b <= 0:
+                continue
+            used_backup = True
+            b_cost = int(b_src["cost_vnd"])
+            b_unit_price = self.compute_stabilized_unit_price(primary_base_vnd, b_cost, min_profit_pct)
+            allocations.append(
+                {
+                    "source_type": str(b_src.get("source_type", "local_stock")),
+                    "source_id": int(b_src["id"]),
+                    "source_name": str(b_src["source_name"]),
+                    "qty": take_b,
+                    "unit_cost_vnd": b_cost,
+                    "unit_base_vnd": b_unit_price,
+                }
+            )
+            rem -= take_b
+
+        if rem > 0:
+            # Phần vượt tồn kho (khi xem preview SP đang hết hàng): tính theo nguồn dự phòng rẻ nhất nếu có
+            all_enabled_backups = [
+                s
+                for s in self.get_product_backup_sources(product_id, backup_map)
+                if int(s.get("active", 0) or 0) == 1
+            ]
+            if primary_stock == 0 and all_enabled_backups:
+                fallback_cost = int(all_enabled_backups[0]["cost_vnd"])
+                fallback_price = self.compute_stabilized_unit_price(primary_base_vnd, fallback_cost, min_profit_pct)
+                used_backup = True
+                allocations.append(
+                    {
+                        "source_type": str(all_enabled_backups[0].get("source_type", "local_stock")),
+                        "source_id": int(all_enabled_backups[0]["id"]),
+                        "source_name": str(all_enabled_backups[0]["source_name"]),
+                        "qty": rem,
+                        "unit_cost_vnd": fallback_cost,
+                        "unit_base_vnd": fallback_price,
+                    }
+                )
+            else:
+                p_unit_price = self.compute_stabilized_unit_price(primary_base_vnd, primary_cost_vnd, min_profit_pct)
+                allocations.append(
+                    {
+                        "source_type": "primary",
+                        "source_id": 0,
+                        "source_name": "ProdSeller",
+                        "qty": rem,
+                        "unit_cost_vnd": primary_cost_vnd,
+                        "unit_base_vnd": p_unit_price,
+                    }
+                )
+
+        total_cost_vnd = sum(int(a["qty"]) * int(a["unit_cost_vnd"]) for a in allocations)
+        total_base_vnd = sum(int(a["qty"]) * int(a["unit_base_vnd"]) for a in allocations)
+        unit_cost_vnd = int(round(total_cost_vnd / qty))
+        base_unit_vnd = int(round(total_base_vnd / qty))
+        price_stabilized_up = base_unit_vnd > primary_base_vnd
+
+        return {
+            "qty": qty,
+            "primary_cost_vnd": primary_cost_vnd,
+            "primary_base_vnd": primary_base_vnd,
+            "unit_cost_vnd": unit_cost_vnd,
+            "total_cost_vnd": total_cost_vnd,
+            "base_unit_vnd": base_unit_vnd,
+            "total_base_vnd": total_base_vnd,
+            "used_backup": used_backup,
+            "price_stabilized_up": price_stabilized_up,
+            "allocations": allocations,
+        }
+
+    def compute_retail_price(
+        self,
+        product_id: str,
+        wholesale_usd: float,
+        overrides: dict[str, dict[str, Any]] | None = None,
+        primary_stock: int | None = None,
+        backup_map: dict[str, list[dict[str, Any]]] | None = None,
+    ) -> int:
+        """Tính giá bán lẻ niêm yết bằng VNĐ (đ) có áp dụng Bình Ổn Giá & Khóa Sàn Lãi >= 150%."""
+        alloc = self.resolve_supply_allocation(
+            product_id=product_id,
+            wholesale_usd=wholesale_usd,
+            qty=1,
+            primary_stock=primary_stock,
+            overrides=overrides,
+            backup_map=backup_map,
+        )
+        return int(alloc["base_unit_vnd"])
 
     def compute_tier_unit_price(
         self,
@@ -848,17 +1346,34 @@ class Database:
         wholesale_usd: float,
         tier: str = "bronze",
         overrides: dict[str, dict[str, Any]] | None = None,
+        primary_stock: int | None = None,
+        backup_map: dict[str, list[dict[str, Any]]] | None = None,
     ) -> tuple[int, int, int]:
         """Trả về (giá_niêm_yết_vnđ, giá_sau_ưu_đãi_hạng_vnđ, phần_trăm_giảm).
-        Luôn đảm bảo giá sau giảm không bao giờ thấp hơn giá vốn đại lý.
+        Luôn đảm bảo giá sau giảm không bao giờ thấp hơn giá vốn đại lý (và bảo vệ sàn lợi nhuận khi dùng nguồn phụ).
         """
-        base_vnd = self.compute_retail_price(product_id, wholesale_usd, overrides)
+        alloc = self.resolve_supply_allocation(
+            product_id=product_id,
+            wholesale_usd=wholesale_usd,
+            qty=1,
+            primary_stock=primary_stock,
+            overrides=overrides,
+            backup_map=backup_map,
+        )
+        base_vnd = int(alloc["base_unit_vnd"])
+        cost_vnd = int(alloc["unit_cost_vnd"])
         disc_pct = TIER_DISCOUNTS.get((tier or "bronze").lower(), 0)
         if disc_pct <= 0:
             return base_vnd, base_vnd, 0
-        cost_vnd = self.compute_wholesale_vnd(wholesale_usd)
+
+        min_profit_pct = float(self.get_setting("min_profit_percent", "150.0") or 0.0)
+        min_floor_vnd = (
+            self._round_nice_vnd(cost_vnd * (1.0 + max(0.0, min_profit_pct) / 100.0))
+            if alloc["used_backup"]
+            else cost_vnd
+        )
         discounted = int(round(base_vnd * (100 - disc_pct) / 100.0 / 500.0) * 500)
-        final_vnd = max(cost_vnd, discounted)
+        final_vnd = max(cost_vnd, min_floor_vnd, discounted)
         if final_vnd >= base_vnd:
             return base_vnd, base_vnd, 0
         return base_vnd, final_vnd, disc_pct
@@ -1013,19 +1528,52 @@ class Database:
         voucher_code: str | None = None,
         user_id: int | None = None,
         overrides: dict[str, dict[str, Any]] | None = None,
+        primary_stock: int | None = None,
+        backup_map: dict[str, list[dict[str, Any]]] | None = None,
     ) -> dict[str, Any]:
-        """Tính toán chi tiết giá đơn hàng (kết hợp Hạng VIP + Mã Giảm Giá Voucher).
-        🛡️ Chốt chặn chống lỗ vốn: Tổng tiền thanh toán cuối cùng (total_final_vnd)
-        LUÔN >= Tổng giá vốn đại lý (total_cost_vnd).
+        """Tính toán chi tiết giá đơn hàng (kết hợp Đa Nguồn Hàng + Bình Ổn Giá + Hạng VIP + Voucher).
+        🛡️ Chốt chặn bảo vệ lợi nhuận & chống lỗ vốn:
+        - Giá bán niêm yết luôn giữ bình ổn theo Nguồn 1, nhưng đảm bảo lãi >= `min_profit_percent` (150%)
+          trên giá vốn thực tế của các nguồn xuất hàng.
+        - Tổng tiền thanh toán cuối cùng (total_final_vnd) LUÔN >= Tổng giá vốn đại lý (total_cost_vnd).
         """
         qty = max(1, int(qty))
-        unit_cost_vnd = self.compute_wholesale_vnd(wholesale_usd)
-        total_cost_vnd = self.compute_wholesale_vnd(wholesale_usd * qty)
-        base_unit_vnd, vip_unit_vnd, vip_disc_pct = self.compute_tier_unit_price(
-            product_id, wholesale_usd, tier, overrides
+        alloc = self.resolve_supply_allocation(
+            product_id=product_id,
+            wholesale_usd=wholesale_usd,
+            qty=qty,
+            primary_stock=primary_stock,
+            overrides=overrides,
+            backup_map=backup_map,
         )
-        total_base_vnd = base_unit_vnd * qty
-        total_vip_vnd = max(total_cost_vnd, vip_unit_vnd * qty)
+        unit_cost_vnd = int(alloc["unit_cost_vnd"])
+        total_cost_vnd = int(alloc["total_cost_vnd"])
+        base_unit_vnd = int(alloc["base_unit_vnd"])
+        total_base_vnd = int(alloc["total_base_vnd"])
+
+        min_profit_pct = float(self.get_setting("min_profit_percent", "150.0") or 0.0)
+        # Khi lấy hàng từ nguồn dự phòng, bảo vệ sàn lợi nhuận tối thiểu >= min_profit_percent (VD: 150%)
+        min_Protected_floor_vnd = (
+            self._round_nice_vnd(total_cost_vnd * (1.0 + max(0.0, min_profit_pct) / 100.0))
+            if alloc["used_backup"]
+            else total_cost_vnd
+        )
+
+        disc_pct = TIER_DISCOUNTS.get((tier or "bronze").lower(), 0)
+        if disc_pct > 0:
+            raw_vip_unit = int(round(base_unit_vnd * (100 - disc_pct) / 100.0 / 500.0) * 500)
+            unit_floor = int(round(min_Protected_floor_vnd / qty))
+            vip_unit_vnd = max(unit_cost_vnd, unit_floor, raw_vip_unit)
+            if vip_unit_vnd >= base_unit_vnd:
+                vip_unit_vnd = base_unit_vnd
+                vip_disc_pct = 0
+            else:
+                vip_disc_pct = disc_pct
+        else:
+            vip_unit_vnd = base_unit_vnd
+            vip_disc_pct = 0
+
+        total_vip_vnd = max(total_cost_vnd, min_Protected_floor_vnd, vip_unit_vnd * qty)
 
         voucher_valid = False
         voucher_reason = ""
@@ -1050,15 +1598,17 @@ class Database:
                     raw_disc = int(round(dval))
 
                 raw_final = total_vip_vnd - raw_disc
-                if raw_final < total_cost_vnd:
+                if raw_final < min_Protected_floor_vnd:
                     floor_capped = True
-                    total_final_vnd = total_cost_vnd
+                    total_final_vnd = min_Protected_floor_vnd
                 else:
                     total_final_vnd = raw_final
                 voucher_discount_vnd = max(0, total_vip_vnd - total_final_vnd)
 
         return {
             "qty": qty,
+            "primary_cost_vnd": int(alloc["primary_cost_vnd"]),
+            "primary_base_vnd": int(alloc["primary_base_vnd"]),
             "unit_cost_vnd": unit_cost_vnd,
             "total_cost_vnd": total_cost_vnd,
             "base_unit_vnd": base_unit_vnd,
@@ -1072,6 +1622,9 @@ class Database:
             "voucher_discount_vnd": voucher_discount_vnd,
             "voucher_reason": voucher_reason,
             "floor_capped": floor_capped,
+            "used_backup": bool(alloc["used_backup"]),
+            "price_stabilized_up": bool(alloc["price_stabilized_up"]),
+            "allocations": alloc["allocations"],
         }
 
     # --- Deposits, Deposit Bonus Tiers & SePay Night-Shift Auto-Approval ---
