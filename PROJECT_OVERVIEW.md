@@ -160,7 +160,8 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
   - **Cổng Public Reseller API v1 (`public_api.py` - bảng `telebot.api_keys`) & Trang tài liệu `/api-docs`** kèm mục giải thích dễ hiểu cho khách hàng trên Bot.
   - **Bộ 4 tính năng vận hành tự động (`v2.5.0`):** Cảnh báo hết vốn ProdSeller, Tự động đăng Restock lên Kênh kèm Deep-link mua ngay, Khuyến mãi nạp tiền theo mốc, và Bảo hành 1 chạm trong Lịch sử đơn hàng.
   - **Hệ thống Tự Động Đăng Bài Kênh & Phễu Thu Hút Khách Hàng (`v2.6.0`):** Tự động đăng Bảng giá + Spotlight SP Hot theo khung giờ (`9h, 14h, 20h`, tự xóa bài cũ), Phễu bắt buộc Join Kênh nhận Quà Tân Thủ (`+5 điểm` + tự động gắn mã `TANTHU10`), Tự động tạo hiệu ứng đơn hàng hoàn tất (Social Proof), và Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút.
-  - **Hệ thống Đa Nguồn Hàng Dự Phòng Tự Động Chuyển Đổi (Multi-Source Failover) & Bình Ổn Giá Thông Minh (`v2.7.0`):** Tự động bù hàng từ Kho Key dự phòng (lấy từ các Bot khác) hoặc API phụ khi `@ProdSellerBot` hết hàng; giữ nguyên giá bán chuẩn `+200%` nếu biên lợi nhuận đạt `>= 150%` và tự động nâng sàn giá vừa đủ để khóa chặt tỷ suất lợi nhuận không bao giờ thấp hơn `150%`.
+  - **Hệ thống Đa Nguồn Hàng Dự Phòng Tự Động Chuyển Đổi (Multi-Source Failover) & Bình Ổn Giá Thông Minh (`v2.7.0` - `v2.8.0`):** Tự động bù hàng từ Kho Key dự phòng hoặc từ `@DanteHubBot` (`https://dantehub.shop/api/public/v1`) khi `@ProdSellerBot` hết hàng; giữ nguyên giá bán chuẩn `+200%` nếu biên lợi nhuận đạt `>= 150%` và tự động nâng sàn giá vừa đủ để khóa chặt tỷ suất lợi nhuận không bao giờ thấp hơn `150%`.
+  - **Hợp Nhất Siêu Kho Hàng 143 Sản Phẩm `@ProdSellerBot` + `@DanteHubBot` (`v2.9.0`):** Gộp chung 21 sản phẩm trùng nhau (hiển thị 1 lần, tự động bù kho chéo) và nhập trực tiếp 102 sản phẩm độc quyền từ `@DanteHubBot` sang bán với Markup chuẩn `+200%`, phân chia thông minh vào 17 danh mục kèm phân trang siêu tốc.
 
 ---
 

@@ -5,6 +5,19 @@
 
 ---
 
+## [v2.9.0] - 2026-10-19: Hợp Nhất Toàn Bộ Kho Hàng `@ProdSellerBot` + `@DanteHubBot` (143 Sản Phẩm — Gộp Chung 21 SP Trùng & Mở Bán 102 SP Độc Quyền)
+
+### 🛍️ 1. Hợp nhất danh mục 2 nguồn thành Siêu Kho Hàng 143 Sản Phẩm (`prodseller_client.py`)
+- **Nguyên tắc "Sản phẩm dùng chung thì hiển thị chung — Sản phẩm riêng của từng Bot đều lấy về bán":**
+  - **21 Sản phẩm dùng chung (`DEFAULT_DANTE_MAPPINGS`):** Các mặt hàng có ở cả `@ProdSellerBot` và `@DanteHubBot` (Adobe Express, Office 365, Gemini Pro, Duolingo Super, Muse AI, Scribd, YouTube Premium, CapCut Pro, Wispr Flow, Figma Pro Edu, JetBrains Edu, Notion Plus, Canva Pro Admin/Edu, ElevenLabs, ChatGPT Plus K12, Apple TV, Surfshark VPN, Claude API, Codex API) được **hiển thị chung 1 lần duy nhất** trên `@KingToolShop_bot`. Khi khách mua, Bot ưu tiên lấy từ `@ProdSellerBot` (lãi chuẩn `+200%`) và tự động chuyển sang lấy từ `@DanteHubBot` nếu `@ProdSellerBot` hết hàng (áp dụng Bình ổn giá khóa sàn lãi `>= 150%`).
+  - **102 Sản phẩm độc quyền từ `@DanteHubBot` (`provider="dantehub"`, mã định danh rút gọn `dh_<21_hex>`):** Toàn bộ các sản phẩm chỉ có trên `@DanteHubBot` (Netflix 4K, Cursor Pro/Ultra, Grok Super, Kling AI, Suno Premier, HeyGen, Higgsfield, Leonardo AI, Midjourney/Gamma, Lovable Pro, Bolt.new, n8n Cloud, Coursera, Udemy, Elsa Speak, NordVPN, Kaspersky, TradingView, LinkedIn, Discord Nitro, X Premium, TV360, VieON...) được tự động đồng bộ trực tiếp vào cửa hàng `@KingToolShop_bot`, tính giá bán lẻ VNĐ tự động theo công thức `+200%` Markup chuẩn và xuất hàng trực tiếp qua API `@DanteHubBot` (`DANTE_<order_id>`).
+
+### 📂 2. Phân loại 17 Nhóm Dịch Vụ Thông Minh & Phân Trang Siêu Tốc (`bot.py` & `i18n.py`)
+- Mở rộng hàm `detect_plan_group(product_name, category)` thành **17 nhóm dịch vụ** trực quan kèm nút **`📋 Xem Tất Cả 143 Sản Phẩm (Từng Trang)`** (`grp:__ALL__:0`) và thanh điều hướng phân trang (`16 SP/trang`), đảm bảo không bao giờ vượt giới hạn 100 nút Inline Keyboard của Telegram và ưu tiên đưa các sản phẩm đang sẵn hàng (`🟢`) lên đầu mỗi danh mục.
+- Tự động bổ sung mô tả tiếng Việt/tiếng Anh chuẩn chỉnh (`localize_product_description`) cho các sản phẩm độc quyền từ `@DanteHubBot`.
+
+---
+
 ## [v2.8.0] - 2026-10-19: Tích Hợp Trực Tiếp Nguồn Hàng Thứ 2 `@DanteHubBot` (DanteHub Partner API v1) & Đấu Nối Tự Động 17 Sản Phẩm Dự Phòng
 
 ### 🔌 1. Tích hợp Native `@DanteHubBot` Partner API v1 (`prodseller_client.py` & `database.py`)

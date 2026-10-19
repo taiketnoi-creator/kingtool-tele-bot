@@ -801,12 +801,22 @@ def localize_product_description(product_id: str, raw_desc: str, lang: str) -> s
     """Trả về mô tả sản phẩm đồng bộ theo ngôn ngữ người dùng đã chọn (vi / en)."""
     desc = (raw_desc or "").strip()
     if lang != "vi":
+        if not desc:
+            return (
+                "⚡ **100% Instant automated account/key delivery within 2 seconds.**\n"
+                "🛡️ **Official warranty & 24/7 support directly on the Bot.**"
+            )
         return desc
     if product_id in PRODUCT_DESC_VI:
         return PRODUCT_DESC_VI[product_id]
     translated = desc
     for en_txt, vi_txt in FALLBACK_PHRASE_MAP_VI:
         translated = translated.replace(en_txt, vi_txt)
+    if not translated:
+        return (
+            "⚡ **Giao tài khoản / key tự động 100% ngay sau khi thanh toán (2 giây).**\n"
+            "🛡️ **Cam kết chính hãng — Hỗ trợ & Bảo hành 1 chạm trực tiếp trên Bot 24/7.**"
+        )
     return translated
 
 

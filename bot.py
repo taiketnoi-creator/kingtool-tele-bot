@@ -53,7 +53,11 @@ logging.basicConfig(
 logger = logging.getLogger("reseller_bot")
 
 db = Database()
-ps_client = ProdSellerClient(os.getenv("PRODSELLER_API_KEY", ""))
+ps_client = ProdSellerClient(
+    os.getenv("PRODSELLER_API_KEY", ""),
+    dante_api_key=db.get_setting("dante_api_key", ""),
+    dante_base_url=db.get_setting("dante_base_url", DANTE_BASE_URL),
+)
 ADMIN_IDS: set[int] = {
     int(x.strip())
     for x in os.getenv("ADMIN_TELEGRAM_IDS", "8110826820").split(",")
@@ -167,8 +171,8 @@ async def send_or_edit(event: Any, text: str, buttons: list[list[Any]] | None = 
     return await event.respond(text, buttons=buttons)
 
 
-# ==================== PRODUCTS & SUB-PLANS (HIỂN THỊ VNĐ) ====================
-async def render_products_menu(event: Any, group_filter: str | None = None) -> None:
+# ==================== PRODUCTS & SUB-PLANS (HIỂN THỊ VNĐ — HỢP NHẤT 142+ SP) ====================
+async def render_products_menu(event: Any, group_filter: str | None = None, page: int = 0) -> None:
     u, lang = await get_user_info(event)
     tier = u.get("tier", "bronze")
     try:
@@ -185,32 +189,38 @@ async def render_products_menu(event: Any, group_filter: str | None = None) -> N
     seen_groups: set[str] = set()
 
     group_stats: dict[str, dict[str, int]] = {}
+    visible_products: list[dict[str, Any]] = []
+    total_in_stock = 0
+
     for p in products:
         ov = overrides.get(p["id"], {})
         if ov.get("hidden"):
             continue
-        g = detect_plan_group(p["name"])
+        visible_products.append(p)
+        eff_stock, eff_in_stock, _, _ = db.get_effective_product_stock(p, backup_map)
+        if eff_in_stock:
+            total_in_stock += 1
+        g = detect_plan_group(p["name"], p.get("category", ""))
         if g:
             st = group_stats.setdefault(g, {"plans": 0, "stock": 0})
             st["plans"] += 1
-            eff_stock, eff_in_stock, _, _ = db.get_effective_product_stock(p, backup_map)
             if eff_in_stock and isinstance(eff_stock, int):
                 st["stock"] += eff_stock
 
     owner_premium = os.getenv("OWNER_HAS_PREMIUM", "false").lower()
     use_fallback = owner_premium != "true"
 
-    for p in products:
-        pid = p["id"]
-        ov = overrides.get(pid, {})
-        if ov.get("hidden"):
-            continue
-        g = detect_plan_group(p["name"])
+    if not group_filter:
+        all_lbl = (
+            f"📋 Xem Tất Cả {len(visible_products)} Sản Phẩm ({total_in_stock} sẵn hàng) »"
+            if lang == "vi"
+            else f"📋 View All {len(visible_products)} Products ({total_in_stock} in stock) »"
+        )
+        rows.append([Button.inline(all_lbl, b"grp:__ALL__:0", style="success")])
 
-        if group_filter:
-            if g != group_filter:
-                continue
-        else:
+        for p in visible_products:
+            pid = p["id"]
+            g = detect_plan_group(p["name"], p.get("category", ""))
             if g:
                 if g not in seen_groups:
                     seen_groups.add(g)
@@ -221,41 +231,97 @@ async def render_products_menu(event: Any, group_filter: str | None = None) -> N
                     rows.append([
                         Button.inline(
                             label,
-                            f"grp:{g}".encode(),
+                            f"grp:{g}:0".encode(),
                             style="primary",
                             icon=grp_icon,
                         )
                     ])
                 continue
 
-        eff_stock, in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
-        _, unit_vnd, _ = db.compute_tier_unit_price(
-            pid,
-            float(p["price"]),
-            tier,
-            overrides,
-            primary_stock=primary_stock,
-            backup_map=backup_map,
-        )
-        badge = stock_badge(eff_stock, in_stock)
-        icon_id, prefix = get_product_icon_and_prefix(p["name"], use_fallback_emoji=use_fallback)
-        btn_style = "success" if in_stock else "danger"
-        btn_label = f"{prefix}{p['name'].strip()} | {unit_vnd:,}đ | {badge}"
-        rows.append([
-            Button.inline(
-                btn_label,
-                f"prd:{pid}".encode(),
-                style=btn_style,
-                icon=icon_id,
+            eff_stock, in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
+            _, unit_vnd, _ = db.compute_tier_unit_price(
+                pid,
+                float(p["price"]),
+                tier,
+                overrides,
+                primary_stock=primary_stock,
+                backup_map=backup_map,
             )
-        ])
+            badge = stock_badge(eff_stock, in_stock)
+            icon_id, prefix = get_product_icon_and_prefix(p["name"], use_fallback_emoji=use_fallback)
+            btn_style = "success" if in_stock else "danger"
+            btn_label = f"{prefix}{p['name'].strip()} | {unit_vnd:,}đ | {badge}"
+            rows.append([
+                Button.inline(
+                    btn_label,
+                    f"prd:{pid}".encode(),
+                    style=btn_style,
+                    icon=icon_id,
+                )
+            ])
+    else:
+        filtered: list[dict[str, Any]] = []
+        for p in visible_products:
+            if group_filter == "__ALL__":
+                filtered.append(p)
+            else:
+                g = detect_plan_group(p["name"], p.get("category", ""))
+                if g == group_filter:
+                    filtered.append(p)
+
+        # Ưu tiên hiển thị sản phẩm đang sẵn hàng lên đầu danh mục
+        filtered.sort(key=lambda item: (0 if db.get_effective_product_stock(item, backup_map)[1] else 1))
+
+        per_page = 16
+        total_items = len(filtered)
+        max_page = max(0, (total_items - 1) // per_page)
+        page = max(0, min(page, max_page))
+        start = page * per_page
+        end = start + per_page
+        sliced = filtered[start:end]
+
+        for p in sliced:
+            pid = p["id"]
+            eff_stock, in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
+            _, unit_vnd, _ = db.compute_tier_unit_price(
+                pid,
+                float(p["price"]),
+                tier,
+                overrides,
+                primary_stock=primary_stock,
+                backup_map=backup_map,
+            )
+            badge = stock_badge(eff_stock, in_stock)
+            icon_id, prefix = get_product_icon_and_prefix(p["name"], use_fallback_emoji=use_fallback)
+            btn_style = "success" if in_stock else "danger"
+            btn_label = f"{prefix}{p['name'].strip()} | {unit_vnd:,}đ | {badge}"
+            rows.append([
+                Button.inline(
+                    btn_label,
+                    f"prd:{pid}".encode(),
+                    style=btn_style,
+                    icon=icon_id,
+                )
+            ])
+
+        if total_items > per_page:
+            nav_row: list[Any] = []
+            if page > 0:
+                nav_row.append(Button.inline("⬅️ Trang trước", f"grp:{group_filter}:{page - 1}".encode()))
+            nav_row.append(Button.inline(f"📄 {page + 1}/{max_page + 1}", b"noop"))
+            if end < total_items:
+                nav_row.append(Button.inline("Trang sau ➡️", f"grp:{group_filter}:{page + 1}".encode()))
+            rows.append(nav_row)
 
     back_target = b"menu:products" if group_filter else b"menu:home"
     rows.append([Button.inline(t(lang, "btn_back"), back_target)])
 
     header = t(lang, "products_title")
-    if group_filter:
-        header = f"{header}\n\n{group_filter}"
+    if group_filter == "__ALL__":
+        header = f"{header}\n\n📋 **Tất cả sản phẩm ({len(visible_products)} SP)**"
+    elif group_filter:
+        grp_emoji = GROUP_EMOJI.get(group_filter, "📂 ")
+        header = f"{header}\n\n{grp_emoji}**{group_filter}**"
 
     await send_or_edit(event, header, buttons=rows)
 
@@ -340,8 +406,8 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
         f"{t(lang, 'in_stock_label')}: **{stock_str}**"
     )
 
-    grp = detect_plan_group(p["name"])
-    back_cb = f"grp:{grp}".encode() if grp else b"menu:products"
+    grp = detect_plan_group(p["name"], p.get("category", ""))
+    back_cb = f"grp:{grp}:0".encode() if grp else b"menu:products"
 
     rows: list[list[Any]] = []
     if in_stock and (stock_num is None or stock_num >= 1):
@@ -1696,14 +1762,16 @@ async def render_admin_product_list(event: Any, page: int = 0) -> None:
     rows: list[list[Any]] = []
     for p in sliced:
         pid = p["id"]
+        is_dh = p.get("provider") == "dantehub"
         _, _, p_st, b_st = db.get_effective_product_stock(p, backup_map)
         retail_vnd = db.compute_retail_price(pid, float(p["price"]), overrides, primary_stock=p_st, backup_map=backup_map)
         ov = overrides.get(pid, {})
         hidden_icon = "🙈 " if ov.get("hidden") else ""
         custom_tag = " 📌" if ov.get("custom_price") is not None else ""
         p_st_lbl = "∞" if p_st is None else str(p_st)
-        b_tag = f" +DP:{b_st}" if b_st > 0 else ""
-        lbl = f"{hidden_icon}{p['name'].strip()[:16]} | K1:{p_st_lbl}{b_tag} | Bán:{retail_vnd:,}đ{custom_tag}"
+        src_tag = "DH" if is_dh else ("PS+DH" if b_st > 0 else "PS")
+        b_tag = f"+{b_st}" if b_st > 0 else ""
+        lbl = f"{hidden_icon}[{src_tag}] {p['name'].strip()[:14]} | K:{p_st_lbl}{b_tag} | {retail_vnd // 1000}k{custom_tag}"
         rows.append([Button.inline(lbl, f"adm:editp:{pid}".encode())])
 
     nav = []
@@ -1717,8 +1785,9 @@ async def render_admin_product_list(event: Any, page: int = 0) -> None:
 
     await send_or_edit(
         event,
-        f"🏷️ **QUẢN LÝ SẢN PHẨM & NGUỒN HÀNG DỰ PHÒNG (Trang {page + 1}/{(total - 1) // per_page + 1})**\n"
-        "• `K1` = Tồn kho chính (@ProdSellerBot) | `+DP` = Tồn kho dự phòng từ Bot/Nguồn khác\n"
+        f"🏷️ **QUẢN LÝ {total} SẢN PHẨM HỢP NHẤT (Trang {page + 1}/{max(1, (total - 1) // per_page + 1)})**\n"
+        "• `[PS+DH]` = SP chung (Ưu tiên `@ProdSellerBot` + Tự động bù `@DanteHubBot`)\n"
+        "• `[DH]` = SP độc quyền từ `@DanteHubBot` | `[PS]` = SP từ `@ProdSellerBot`\n"
         "• 📌 = Giá cố định riêng | 🙈 = Đang ẩn\n"
         "👉 Bấm vào sản phẩm để **Nạp Key Dự Phòng / Đấu API Bot khác** hoặc chỉnh giá:",
         buttons=rows,
@@ -1729,6 +1798,7 @@ async def render_admin_edit_product(event: Any, product_id: str) -> None:
     p = await ps_client.get_product_by_id(product_id, refresh=False)
     if not p:
         return
+    is_dh_primary = p.get("provider") == "dantehub"
     ov = db.get_product_override(product_id) or {}
     backup_map = db.get_all_backup_sources()
     eff_st, _, p_st, b_st = db.get_effective_product_stock(p, backup_map)
@@ -1769,8 +1839,9 @@ async def render_admin_edit_product(event: Any, product_id: str) -> None:
             )
     b_block = "\n".join(b_lines)
     p_st_val = 1 if p_st is None else int(p_st)
+    k1_name = "@DanteHubBot (Độc quyền)" if is_dh_primary else "@ProdSellerBot"
     active_src_note = (
-        "🟢 Đang lấy từ **Kho chính @ProdSellerBot**"
+        f"🟢 Đang lấy từ **Kho chính {k1_name}**"
         if p_st_val > 0
         else ("🟡 Kho chính hết hàng ➡️ **Đang tự động lấy từ Nguồn Dự Phòng!**" if b_st > 0 else "🔴 Cả kho chính & dự phòng đều đang hết hàng")
     )
@@ -1780,10 +1851,10 @@ async def render_admin_edit_product(event: Any, product_id: str) -> None:
     text = (
         f"🏷️ **QUẢN LÝ SẢN PHẨM & ĐA NGUỒN HÀNG**\n\n"
         f"🛍️ Tên: **{p['name']}**\n"
-        f"🆔 ID: `{product_id}`\n"
+        f"🆔 ID: `{product_id}`" + (f" *(UUID: `{p.get('dante_uuid')}`)*\n" if is_dh_primary else "\n") +
         f"📡 Trạng thái cấp hàng: {active_src_note}\n"
         f"📦 Tồn kho: **Tổng `{eff_st_lbl}`** (Kho chính K1: `{p_st_lbl}` | Dự phòng: `{b_st}`)\n"
-        f"📉 Giá vốn K1 (@ProdSellerBot): **{cost_vnd:,}đ** (`${cost_usd:.2f}`)\n"
+        f"📉 Giá vốn K1 ({k1_name}): **{cost_vnd:,}đ** (`${cost_usd:.2f}`)\n"
         f"🎯 Giá chuẩn K1 (+{db.get_setting('markup_percent', '200')}%): **{primary_base_vnd:,}đ**\n"
         f"💰 **Giá bán thực tế hiện tại (Bình ổn): `{retail_vnd:,}đ`** "
         f"({'Giá cố định riêng 📌' if has_custom else f'Cam kết lãi >= +{min_profit_pct:g}%'})\n"
@@ -1855,6 +1926,7 @@ async def render_admin_dante_picker(event: Any, product_id: str) -> None:
     rows: list[list[Any]] = []
     for m in matches:
         dh_id = str(m["id"])
+        dh_short = dh_id.replace("-", "")[:16]
         title = str(m.get("title") or m.get("name") or dh_id)
         usd_val = float(m.get("price", 0) or 0)
         cost_vnd = max(500, int(round(usd_val * rate)))
@@ -1869,7 +1941,7 @@ async def render_admin_dante_picker(event: Any, product_id: str) -> None:
         rows.append([
             Button.inline(
                 f"{st_icon} Gắn: {title[:24]} (Vốn {cost_vnd // 1000}k -> Bán {stab_vnd // 1000}k)",
-                f"adm:bsrc_dpick:{product_id}:{dh_id}".encode(),
+                f"adm:bsrc_dpick:{product_id}:{dh_short}".encode(),
                 style="success" if in_st else None,
             )
         ])
@@ -1885,7 +1957,12 @@ async def poll_pending_activations_loop(client: TelegramClient) -> None:
         for o in pending:
             try:
                 ps_oid = str(o.get("prodseller_order_id") or "")
-                if ps_oid.startswith("EXT_"):
+                if ps_oid.startswith("DANTE_"):
+                    remote_oid = ps_oid[6:]
+                    b_url = db.get_setting("dante_base_url", DANTE_BASE_URL)
+                    b_key = db.get_setting("dante_api_key", "") or ps_client.dante_api_key
+                    st = await ps_client.get_external_api_order_status(str(b_url), str(b_key), remote_oid)
+                elif ps_oid.startswith("EXT_"):
                     parts = ps_oid.split("_", 2)
                     if len(parts) == 3:
                         sid = int(parts[1])
@@ -2124,7 +2201,13 @@ async def run_bot() -> None:
 
         if data.startswith("grp:"):
             await event.answer()
-            await render_products_menu(event, group_filter=data.split(":", 1)[1])
+            rest = data[4:]
+            if ":" in rest:
+                g_name, p_str = rest.rsplit(":", 1)
+                page_idx = int(p_str) if p_str.isdigit() else 0
+            else:
+                g_name, page_idx = rest, 0
+            await render_products_menu(event, group_filter=g_name, page=page_idx)
             return
 
         if data.startswith("prd:"):
@@ -2755,14 +2838,19 @@ async def run_bot() -> None:
                 if not d_key:
                     await event.answer("⚠️ Bạn chưa cài API Key @DanteHubBot! Hãy bấm nút '🔑 Key @DanteHubBot'.", alert=True)
                     return
-                await event.answer("⏳ Đang đồng bộ bảng giá & tồn kho 124 SP từ @DanteHubBot...")
+                await event.answer("⏳ Đang đồng bộ & hợp nhất danh mục từ @ProdSellerBot + @DanteHubBot...")
                 try:
                     res = await ps_client.sync_all_dante_backups(db, d_key, d_url, auto_seed_defaults=True)
+                    all_prods = await ps_client.sync_products(force=True)
+                    dh_excl = sum(1 for p in all_prods if p.get("provider") == "dantehub")
+                    ps_cnt = len(all_prods) - dh_excl
                     await event.respond(
-                        f"✅ **ĐỒNG BỘ @DanteHubBot HOÀN TẤT!**\n\n"
-                        f"🔗 Tổng sản phẩm đang đấu nối dự phòng: **{res['linked']} SP** (Mới gắn thêm: **{res['seeded']} SP**)\n"
-                        f"🟢 Số nguồn `@DanteHubBot` đang sẵn hàng: **{res['in_stock']} SP**\n"
-                        f"🛡️ Mọi sản phẩm dự phòng từ `@DanteHubBot` đều tự động áp dụng **Bình ổn giá (+200% Markup chuẩn, khóa sàn lãi >= +{db.get_setting('min_profit_percent', '150')}% )**!",
+                        f"✅ **ĐỒNG BỘ & HỢP NHẤT KHO HÀNG HOÀN TẤT!**\n\n"
+                        f"🛍️ **Tổng sản phẩm hiển thị trên Shop: `{len(all_prods)} SP`**\n"
+                        f"  • Sản phẩm từ `@ProdSellerBot`: **`{ps_cnt} SP`** *(Trong đó **`{res['linked']} SP`** dùng chung đã gộp `@DanteHubBot` làm dự phòng)*\n"
+                        f"  • Sản phẩm độc quyền từ `@DanteHubBot`: **`{dh_excl} SP`** *(Lấy trực tiếp sang bán với Markup chuẩn `+{db.get_setting('markup_percent', '200')}%`)*\n"
+                        f"🟢 Nguồn dự phòng `@DanteHubBot` đang sẵn hàng: **`{res['in_stock']} SP`**\n"
+                        f"🛡️ Mọi sản phẩm đều tự động áp dụng **Bình ổn giá (Khóa sàn lãi `>= +{db.get_setting('min_profit_percent', '150')}%`)**!",
                         buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
                     )
                 except Exception as exc:
@@ -2782,10 +2870,17 @@ async def run_bot() -> None:
                 parts = data.split(":", 3)
                 if len(parts) < 4:
                     return
-                pid, dh_id = parts[2], parts[3]
+                pid, dh_short = parts[2], parts[3]
                 d_key = (db.get_setting("dante_api_key", "") or os.getenv("DANTE_API_KEY", "")).strip()
                 d_url = (db.get_setting("dante_base_url", DANTE_BASE_URL) or DANTE_BASE_URL).strip()
-                info = await ps_client.fetch_external_api_product(d_url, d_key, dh_id)
+                catalog = await ps_client.fetch_dantehub_catalog(d_url, d_key, force=False)
+                full_dh_id = dh_short
+                for item in catalog:
+                    cand = str(item.get("id", "")).strip()
+                    if cand == dh_short or cand.replace("-", "").startswith(dh_short.replace("-", "")):
+                        full_dh_id = cand
+                        break
+                info = await ps_client.fetch_external_api_product(d_url, d_key, full_dh_id)
                 if not info:
                     await event.answer("❌ Không tìm thấy sản phẩm trên @DanteHubBot.", alert=True)
                     return
@@ -2798,10 +2893,11 @@ async def run_bot() -> None:
                     cost_vnd=cost_vnd,
                     api_base_url=d_url,
                     api_key=d_key,
-                    remote_product_id=dh_id,
+                    remote_product_id=full_dh_id,
                     remote_stock=init_st,
                 )
-                await event.answer(f"✅ Đã gắn nguồn @DanteHubBot ({info.get('name', dh_id)[:20]})!", alert=True)
+                ps_client._linked_dante_ids.add(full_dh_id)
+                await event.answer(f"✅ Đã gắn nguồn @DanteHubBot ({info.get('name', full_dh_id)[:20]})!", alert=True)
                 await render_admin_edit_product(event, pid)
                 return
 

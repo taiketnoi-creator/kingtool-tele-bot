@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import re
 import time
 from typing import Any
@@ -13,7 +14,7 @@ import httpx
 BASE_URL = "https://prodseller.com/v1"
 DANTE_BASE_URL = "https://dantehub.shop/api/public/v1"
 
-# Danh sách 17 sản phẩm tương đương giữa @ProdSellerBot (product_id) và @DanteHubBot (remote_product_id)
+# Danh sách 21 sản phẩm dùng chung giữa @ProdSellerBot (product_id) và @DanteHubBot (remote_product_id)
 DEFAULT_DANTE_MAPPINGS: list[tuple[str, str, str]] = [
     ("6a5b873847b606c66fc160b2", "be463cf1-d374-4765-81e7-205fa7ded577", "DanteHub"),  # Adobe Express 12M
     ("6a2fe23a1c8697b163aedcbd", "29f62cae-b550-4047-811e-548373cba029", "DanteHub"),  # Microsoft Office 365 Plus 1Y
@@ -32,63 +33,127 @@ DEFAULT_DANTE_MAPPINGS: list[tuple[str, str, str]] = [
     ("6acf6cf6a8f487d336acb4ab", "97c3d979-e770-42e9-93a2-0a332123ea94", "DanteHub"),  # ElevenLabs 100K Credit
     ("6a495a5f02999800df961920", "4212e10e-6369-41c7-814b-778ce82a6efc", "DanteHub"),  # ChatGPT Plus K12 Edu 24M
     ("6a316a7b1777fc2347835653", "5003b154-9d14-432e-a232-e3d2be2d18e1", "DanteHub"),  # Canva Pro Team Edu 3Y
+    ("6abeace70dbb401865ffb2d2", "e7dc36ba-06bf-4b5f-989d-ff7ef280a144", "DanteHub"),  # Apple TV 12 Months Link
+    ("6a8ad927f870e3b3430c7b18", "ea67449c-0dac-4d45-b596-dfa0bfc9251d", "DanteHub"),  # Framer AI 1 Year
+    ("6acfc869a8f487d336b13845", "a7d4b6e6-822b-418c-ae13-ca91da33c41f", "DanteHub"),  # Spotify Premium 1M
+    ("6a8c8ef9f870e3b343103eb0", "f407a873-1c8a-478c-ba40-5b6a04f2f353", "DanteHub"),  # Autodesk All Apps
 ]
+
+# Các ID trùng lặp hoặc mục Test nội bộ trên DanteHub không hiển thị riêng lẻ
+EXTRA_SKIP_DANTE_IDS: set[str] = {
+    "0015a475-163b-41cc-90e6-0fafbb6ba6e4",  # Duplicate Figma Pro Edu 2yrs
+    "b665a651-4c58-4b3d-91ec-4692724a5031",  # Test API for Developers ($0.01)
+}
 
 # Custom Emoji Icon IDs + Unicode Icons cho từng nhóm và từng sản phẩm
 GROUP_ICONS: dict[str, int] = {
-    "Gmail": 5307602416961609760,
-    "ChatGPT CODEX": 5796185041717433060,
+    "ChatGPT & OpenAI": 5796185041717433060,
     "Claude AI": 6174520215376763867,
-    "CapCut": 6124915477706705232,
+    "Gemini & Google AI": 5206660927339924387,
+    "Cursor & Grok AI": 5300959605793235101,
+    "Kling, Suno & Video AI": 5891219692881714411,
+    "Leonardo, Gamma & Ảnh AI": 5393312805795407636,
+    "ElevenLabs & Giọng Nói AI": 6219689196722854904,
+    "MiniMax & Muse AI": 5891219692881714411,
+    "Lovable, n8n & Dev Tools": 5300959605793235101,
     "Canva": 5879982576671657703,
+    "CapCut": 6124915477706705232,
+    "Figma, Adobe & Thiết Kế": 6145685845060883545,
+    "Office 365, Notion & Văn Phòng": 6102808052673548025,
+    "YouTube, Netflix & Giải Trí": 5926990577114550753,
+    "Duolingo, Coursera & Học Tập": 5796371348808799072,
+    "VPN & Bảo Mật": 5350619413533958825,
+    "Gmail, Outlook & MXH": 5307602416961609760,
 }
 
 GROUP_EMOJI: dict[str, str] = {
-    "Gmail": "📧 ",
-    "ChatGPT CODEX": "🤖 ",
+    "ChatGPT & OpenAI": "🤖 ",
     "Claude AI": "🧠 ",
-    "CapCut": "🎬 ",
+    "Gemini & Google AI": "✨ ",
+    "Cursor & Grok AI": "⚡ ",
+    "Kling, Suno & Video AI": "🎥 ",
+    "Leonardo, Gamma & Ảnh AI": "🖼️ ",
+    "ElevenLabs & Giọng Nói AI": "🎙️ ",
+    "MiniMax & Muse AI": "🚀 ",
+    "Lovable, n8n & Dev Tools": "💻 ",
     "Canva": "🎨 ",
+    "CapCut": "🎬 ",
+    "Figma, Adobe & Thiết Kế": "📐 ",
+    "Office 365, Notion & Văn Phòng": "💼 ",
+    "YouTube, Netflix & Giải Trí": "🍿 ",
+    "Duolingo, Coursera & Học Tập": "🎓 ",
+    "VPN & Bảo Mật": "🛡️ ",
+    "Gmail, Outlook & MXH": "📧 ",
 }
 
 PRODUCT_KEYWORD_ICONS: list[tuple[str, int | None, str]] = [
     ("spotify", 5926990577114550753, "🎧 "),
+    ("netflix", None, "🍿 "),
     ("elevenlabs", 6219689196722854904, "🎙️ "),
+    ("eleven reader", 6219689196722854904, "🎙️ "),
     ("gmail", 5307602416961609760, "📧 "),
-    ("scribd", None, "📦 "),
+    ("scribd", None, "📚 "),
     ("muse ai", 5891219692881714411, "🎵 "),
+    ("minimax", 5891219692881714411, "🚀 "),
+    ("chatgpt", 5796185041717433060, "🤖 "),
     ("codex", 5796185041717433060, "🤖 "),
     ("claude", 6174520215376763867, "🧠 "),
+    ("cursor", 5300959605793235101, "⚡ "),
+    ("grok", None, "🔥 "),
+    ("kling", None, "🎥 "),
+    ("higgsfield", None, "🎥 "),
+    ("heygen", None, "🎥 "),
+    ("suno", 5891219692881714411, "🎵 "),
+    ("leonardo", None, "🖼️ "),
+    ("gamma", None, "📊 "),
+    ("lovable", None, "💖 "),
+    ("bolt", None, "⚡ "),
+    ("n8n", None, "🔄 "),
+    ("replit", None, "💻 "),
     ("wispr", 6069015112549669594, "🗣️ "),
     ("apple tv", 5469922901958346945, "🍎 "),
+    ("apple music", 5469922901958346945, "🍎 "),
     ("duolingo", 5796371348808799072, "🦉 "),
+    ("coursera", 5769598970816897041, "🎓 "),
+    ("udemy", 5769598970816897041, "🎓 "),
+    ("quizlet", 5769598970816897041, "🎓 "),
     ("capcut", 6124915477706705232, "🎬 "),
     ("hbo", 5346319945112240722, "🎞️ "),
     ("telegram", None, "✈️ "),
+    ("x premium", None, "🐦 "),
+    ("facebook", None, "📘 "),
+    ("discord", None, "🎮 "),
     ("autodesk", 6305045014531548800, "📐 "),
     ("framer", 6312056780570499991, "⚡ "),
     ("jetbrains", 5300959605793235101, "💻 "),
     ("avira", 5350619413533958825, "🛡️ "),
+    ("kaspersky", 5350619413533958825, "🛡️ "),
+    ("nordvpn", 5350619413533958825, "🛡️ "),
+    ("surfshark", 5350619413533958825, "🛡️ "),
+    ("vpn", 5350619413533958825, "🛡️ "),
     ("edx", 5769598970816897041, "🎓 "),
     ("gemini", 5206660927339924387, "✨ "),
     ("figma", 5393312805795407636, "🎨 "),
     ("miro", None, "📝 "),
     ("ilovepdf", 6239983230729068544, "📄 "),
+    ("grammarly", None, "✍️ "),
     ("outlook", 5796683820564484775, "📨 "),
     ("hotmail", 5796683820564484775, "📨 "),
     ("adobe", 6145685845060883545, "🅰️ "),
     ("notion", 5233464190441662039, "📓 "),
     ("prime video", 6111801057061374810, "📺 "),
+    ("tv360", 6111801057061374810, "📺 "),
     ("canva", 5879982576671657703, "🖌️ "),
-    ("office 365", 6102808052673548025, "💼 "),
+    ("office", 6102808052673548025, "💼 "),
     ("microsoft", 6102808052673548025, "💼 "),
     ("youtube", None, "▶️ "),
+    ("vidiq", None, "▶️ "),
     ("hma", None, "🛡️ "),
 ]
 
 
 def get_product_icon_and_prefix(product_name: str, use_fallback_emoji: bool = False) -> tuple[int | None, str]:
-    """Trả về (custom_emoji_icon_id, text_prefix) giống hệt bản gốc @ProdSellerBot."""
+    """Trả về (custom_emoji_icon_id, text_prefix) cho từng sản phẩm."""
     low = product_name.lower()
     for kw, icon_id, prefix in PRODUCT_KEYWORD_ICONS:
         if kw in low:
@@ -98,19 +163,43 @@ def get_product_icon_and_prefix(product_name: str, use_fallback_emoji: bool = Fa
     return None, "📦 "
 
 
-def detect_plan_group(product_name: str) -> str | None:
-    """Phân nhóm sản phẩm đa gói (Sub-plans) giống hệt giao diện @ProdSellerBot."""
-    low = product_name.lower()
-    if "gmail" in low:
-        return "Gmail"
-    if "codex" in low:
-        return "ChatGPT CODEX"
+def detect_plan_group(product_name: str, category: str = "") -> str | None:
+    """Phân nhóm thông minh toàn bộ 142+ sản phẩm của @ProdSellerBot và @DanteHubBot."""
+    low = f"{category} {product_name}".lower()
+    if any(k in low for k in ("chatgpt", "codex", "openai")):
+        return "ChatGPT & OpenAI"
     if "claude" in low:
         return "Claude AI"
-    if "capcut" in low:
-        return "CapCut"
+    if "gemini" in low:
+        return "Gemini & Google AI"
+    if any(k in low for k in ("cursor", "grok", "supergrok")):
+        return "Cursor & Grok AI"
+    if any(k in low for k in ("kling", "higgsfield", "heygen", "seedance", "suno", "descript", "vidiq")):
+        return "Kling, Suno & Video AI"
+    if any(k in low for k in ("leonardo", "gamma", "meitu", "magic patterns")):
+        return "Leonardo, Gamma & Ảnh AI"
+    if any(k in low for k in ("elevenlabs", "eleven reader", "wispr")):
+        return "ElevenLabs & Giọng Nói AI"
+    if any(k in low for k in ("minimax", "muse ai")):
+        return "MiniMax & Muse AI"
+    if any(k in low for k in ("lovable", "bolt", "replit", "jetbrains", "n8n", "linear", "gumloop", "posthog", "resend", "intercom", "pangram", "factory ai")):
+        return "Lovable, n8n & Dev Tools"
     if "canva" in low:
         return "Canva"
+    if any(k in low for k in ("capcut", "supercut")):
+        return "CapCut"
+    if any(k in low for k in ("figma", "adobe", "autodesk", "framer", "miro")):
+        return "Figma, Adobe & Thiết Kế"
+    if any(k in low for k in ("office", "microsoft 365", "notion", "grammarly", "ilovepdf", "scribd", "granola")):
+        return "Office 365, Notion & Văn Phòng"
+    if any(k in low for k in ("youtube", "netflix", "spotify", "apple tv", "apple music", "hbo", "prime video", "tv360", "discord")):
+        return "YouTube, Netflix & Giải Trí"
+    if any(k in low for k in ("duolingo", "coursera", "edx", "udemy", "quizlet")):
+        return "Duolingo, Coursera & Học Tập"
+    if any(k in low for k in ("vpn", "nordvpn", "surfshark", "kaspersky", "avira", "proton", "purevpn", "hma")):
+        return "VPN & Bảo Mật"
+    if any(k in low for k in ("gmail", "outlook", "hotmail", "telegram", "x premium", "facebook")):
+        return "Gmail, Outlook & MXH"
     return None
 
 
@@ -126,8 +215,18 @@ def stock_badge(stock: int | None, in_stock: bool) -> str:
 
 
 class ProdSellerClient:
-    def __init__(self, api_key: str) -> None:
+    def __init__(
+        self,
+        api_key: str,
+        dante_api_key: str = "",
+        dante_base_url: str = DANTE_BASE_URL,
+    ) -> None:
         self.api_key = api_key.strip()
+        self.dante_api_key = (
+            dante_api_key
+            or os.getenv("DANTE_API_KEY", "dh_live_d56175ed6a4bf6f70ac166f2efa9c7f49fc49e81e4be91e4")
+        ).strip()
+        self.dante_base_url = (dante_base_url or os.getenv("DANTE_BASE_URL", DANTE_BASE_URL)).strip()
         self._products_cache: list[dict[str, Any]] = []
         self._stock_cache: dict[str, int | None] = {}
         self._last_sync: float = 0.0
@@ -135,6 +234,18 @@ class ProdSellerClient:
         self._http: httpx.AsyncClient | None = None
         self._dante_products_cache: list[dict[str, Any]] = []
         self._dante_last_sync: float = 0.0
+        self._linked_dante_ids: set[str] = {dh_id for _, dh_id, _ in DEFAULT_DANTE_MAPPINGS} | set(EXTRA_SKIP_DANTE_IDS)
+
+    def set_dante_credentials(self, api_key: str, base_url: str = DANTE_BASE_URL) -> None:
+        if api_key and api_key.strip():
+            self.dante_api_key = api_key.strip()
+        if base_url and base_url.strip():
+            self.dante_base_url = base_url.strip()
+
+    @staticmethod
+    def make_dante_short_id(dh_uuid: str) -> str:
+        clean = str(dh_uuid).strip().replace("-", "")
+        return f"dh_{clean[:21]}"
 
     def _get_http(self) -> httpx.AsyncClient:
         if self._http is None or self._http.is_closed:
@@ -191,11 +302,12 @@ class ProdSellerClient:
         api_key: str = "",
     ) -> dict[str, Any]:
         """Lấy số dư ví USDT trên @DanteHubBot hoặc cổng Reseller API ngoài."""
-        base = self._normalize_external_base(api_base_url)
+        base = self._normalize_external_base(api_base_url or self.dante_base_url)
+        key = (api_key or self.dante_api_key).strip()
         client = self._get_http()
         resp = await client.get(
             f"{base}/balance",
-            headers=self._external_headers(api_key),
+            headers=self._external_headers(key),
             timeout=12.0,
         )
         resp.raise_for_status()
@@ -212,11 +324,14 @@ class ProdSellerClient:
         now = time.time()
         if not force and self._dante_products_cache and (now - self._dante_last_sync < cache_ttl):
             return self._dante_products_cache
-        base = self._normalize_external_base(api_base_url)
+        base = self._normalize_external_base(api_base_url or self.dante_base_url)
+        key = (api_key or self.dante_api_key).strip()
+        if not key:
+            return self._dante_products_cache
         client = self._get_http()
         resp = await client.get(
             f"{base}/products",
-            headers=self._external_headers(api_key),
+            headers=self._external_headers(key),
             timeout=15.0,
         )
         resp.raise_for_status()
@@ -262,7 +377,7 @@ class ProdSellerClient:
         return data
 
     async def sync_products(self, force: bool = False, cache_ttl: float = 60.0) -> list[dict[str, Any]]:
-        """Lấy danh sách sản phẩm và đồng bộ số lượng tồn kho chi tiết.
+        """Lấy danh sách sản phẩm hợp nhất từ cả @ProdSellerBot và @DanteHubBot (142+ sản phẩm).
         Sử dụng cơ chế Stale-While-Revalidate: nếu đã có cache và force=False, trả về ngay lập tức
         để người dùng không bao giờ phải chờ, đồng thời tự động làm mới ngầm nếu cache đã quá hạn.
         """
@@ -277,54 +392,116 @@ class ProdSellerClient:
     async def _refresh_products_internal(self) -> list[dict[str, Any]]:
         async with self._lock:
             client = self._get_http()
-            resp = await client.get(f"{BASE_URL}/products", headers=self._headers())
-            resp.raise_for_status()
-            products: list[dict[str, Any]] = resp.json().get("products", [])
+            ps_products: list[dict[str, Any]] = []
+            try:
+                resp = await client.get(f"{BASE_URL}/products", headers=self._headers())
+                resp.raise_for_status()
+                products: list[dict[str, Any]] = resp.json().get("products", [])
 
-            sem = asyncio.Semaphore(8)
+                sem = asyncio.Semaphore(8)
 
-            async def _fetch_stock(p: dict[str, Any]) -> None:
-                pid = p["id"]
-                if not p.get("inStock", False):
-                    self._stock_cache[pid] = 0
-                    p["stock"] = 0
-                    return
-                async with sem:
-                    try:
-                        r = await client.get(f"{BASE_URL}/products/{pid}", headers=self._headers())
-                        if r.status_code == 200:
-                            detail = r.json()
-                            st = detail.get("stock")
-                            self._stock_cache[pid] = st
-                            p["stock"] = st
-                    except Exception as exc:
-                        logging.debug("Không lấy được stock chi tiết %s: %s", pid, exc)
-                        p["stock"] = self._stock_cache.get(pid)
+                async def _fetch_stock(p: dict[str, Any]) -> None:
+                    pid = p["id"]
+                    p["provider"] = "prodseller"
+                    if not p.get("inStock", False):
+                        self._stock_cache[pid] = 0
+                        p["stock"] = 0
+                        return
+                    async with sem:
+                        try:
+                            r = await client.get(f"{BASE_URL}/products/{pid}", headers=self._headers())
+                            if r.status_code == 200:
+                                detail = r.json()
+                                st = detail.get("stock")
+                                self._stock_cache[pid] = st
+                                p["stock"] = st
+                        except Exception as exc:
+                            logging.debug("Không lấy được stock chi tiết %s: %s", pid, exc)
+                            p["stock"] = self._stock_cache.get(pid)
 
-            await asyncio.gather(*(_fetch_stock(p) for p in products))
+                await asyncio.gather(*(_fetch_stock(p) for p in products))
+                ps_products = list(reversed(products))
+            except Exception as exc:
+                logging.warning("Không đồng bộ được danh sách ProdSeller: %s", exc)
+                ps_products = [p for p in self._products_cache if p.get("provider") == "prodseller"]
 
-            self._products_cache = list(reversed(products))
-            self._last_sync = time.time()
+            dante_exclusive: list[dict[str, Any]] = []
+            if self.dante_api_key:
+                try:
+                    dh_catalog = await self.fetch_dantehub_catalog(
+                        self.dante_base_url,
+                        self.dante_api_key,
+                        force=True,
+                    )
+                    skip_ids = (
+                        {dh_id for _, dh_id, _ in DEFAULT_DANTE_MAPPINGS}
+                        | set(EXTRA_SKIP_DANTE_IDS)
+                        | self._linked_dante_ids
+                    )
+                    for item in dh_catalog:
+                        dh_uuid = str(item.get("id", "")).strip()
+                        if not dh_uuid or dh_uuid in skip_ids:
+                            continue
+                        short_id = self.make_dante_short_id(dh_uuid)
+                        in_st = bool(item.get("in_stock", item.get("inStock", False)))
+                        raw_st = item.get("stock")
+                        st_val = int(raw_st) if raw_st is not None else (50 if in_st else 0)
+                        title = str(item.get("title") or item.get("name") or dh_uuid).strip()
+                        cat = str(item.get("category") or "").strip()
+                        desc = str(item.get("description") or "").strip()
+                        price_usd = float(item.get("price", 0) or 0)
+                        dante_exclusive.append(
+                            {
+                                "id": short_id,
+                                "dante_uuid": dh_uuid,
+                                "provider": "dantehub",
+                                "name": title,
+                                "category": cat,
+                                "description": desc,
+                                "price": price_usd,
+                                "inStock": in_st and st_val > 0,
+                                "stock": st_val if in_st else 0,
+                            }
+                        )
+                except Exception as exc:
+                    logging.warning("Không đồng bộ được danh sách độc quyền DanteHub: %s", exc)
+                    dante_exclusive = [p for p in self._products_cache if p.get("provider") == "dantehub"]
+
+            if ps_products or dante_exclusive:
+                self._products_cache = ps_products + dante_exclusive
+                self._last_sync = time.time()
             return self._products_cache
 
     async def get_product_by_id(self, product_id: str, refresh: bool = False) -> dict[str, Any] | None:
-        """Lấy thông tin 1 sản phẩm. Nếu refresh=True chỉ gọi API chi tiết của đúng sản phẩm đó
-        thay vì quét lại toàn bộ 29 sản phẩm, giúp mở trang chi tiết & mua hàng nhanh gấp 10 lần.
-        """
+        """Lấy thông tin 1 sản phẩm (từ ProdSeller hoặc DanteHub). Nếu refresh=True chỉ làm mới đúng nguồn của sản phẩm."""
         if not self._products_cache:
             await self.sync_products(force=True)
 
+        target = str(product_id).strip()
         for p in self._products_cache:
-            if p["id"] == product_id:
+            if p["id"] == target or p.get("dante_uuid") == target:
                 if refresh:
                     try:
-                        detail = await self.fetch_product_detail(product_id)
-                        p["stock"] = detail.get("stock", p.get("stock"))
-                        p["price"] = detail.get("price", p.get("price"))
-                        if "inStock" in detail:
-                            p["inStock"] = detail["inStock"]
-                        elif isinstance(p.get("stock"), int):
-                            p["inStock"] = p["stock"] > 0
+                        if p.get("provider") == "dantehub":
+                            dh_uuid = str(p.get("dante_uuid") or target)
+                            detail = await self.fetch_external_api_product(
+                                self.dante_base_url,
+                                self.dante_api_key,
+                                dh_uuid,
+                                force_refresh=True,
+                            )
+                            if detail:
+                                p["stock"] = detail.get("stock", p.get("stock"))
+                                p["price"] = detail.get("price", p.get("price"))
+                                p["inStock"] = detail.get("inStock", p.get("inStock"))
+                        else:
+                            detail = await self.fetch_product_detail(p["id"])
+                            p["stock"] = detail.get("stock", p.get("stock"))
+                            p["price"] = detail.get("price", p.get("price"))
+                            if "inStock" in detail:
+                                p["inStock"] = detail["inStock"]
+                            elif isinstance(p.get("stock"), int):
+                                p["inStock"] = p["stock"] > 0
                     except Exception:
                         pass
                 return p
@@ -580,12 +757,13 @@ class ProdSellerClient:
         auto_seed_defaults: bool = True,
     ) -> dict[str, int]:
         """Đồng bộ toàn bộ nguồn dự phòng @DanteHubBot trong 1 request duy nhất:
-        - Nếu `auto_seed_defaults=True`, tự động đấu nối 17 sản phẩm tương đương giữa ProdSeller & DanteHub.
+        - Nếu `auto_seed_defaults=True`, tự động đấu nối 21 sản phẩm tương đương giữa ProdSeller & DanteHub.
         - Cập nhật giá vốn VNĐ (theo tỷ giá `vnd_rate`) và tồn kho thực tế từ @DanteHubBot.
         """
-        clean_key = (dante_key or "").strip()
+        clean_key = (dante_key or self.dante_api_key).strip()
         if not clean_key:
             return {"linked": 0, "in_stock": 0, "seeded": 0}
+        self.set_dante_credentials(clean_key, dante_url)
 
         catalog = await self.fetch_dantehub_catalog(dante_url, clean_key, force=True)
         dh_map = {str(item.get("id", "")).strip(): item for item in catalog if item.get("id")}
@@ -624,6 +802,7 @@ class ProdSellerClient:
 
         linked_cnt = 0
         in_stock_cnt = 0
+        new_linked_ids: set[str] = {dh_id for _, dh_id, _ in DEFAULT_DANTE_MAPPINGS} | set(EXTRA_SKIP_DANTE_IDS)
         for _, src_list in bmap.items():
             for src in src_list:
                 if src.get("source_type") != "api":
@@ -633,6 +812,8 @@ class ProdSellerClient:
                     continue
                 linked_cnt += 1
                 r_pid = str(src.get("remote_product_id", "")).strip()
+                if r_pid:
+                    new_linked_ids.add(r_pid)
                 dh_item = dh_map.get(r_pid)
                 if not dh_item:
                     continue
@@ -644,6 +825,7 @@ class ProdSellerClient:
                 new_cost = max(500, int(round(usd_price * rate))) if usd_price > 0 else None
                 db.update_api_backup_stock(int(src["id"]), new_st, new_cost)
 
+        self._linked_dante_ids = new_linked_ids
         return {"linked": linked_cnt, "in_stock": in_stock_cnt, "seeded": seeded}
 
     async def fulfill_multi_source_order(
@@ -655,11 +837,12 @@ class ProdSellerClient:
         idempotency_key: str | None = None,
     ) -> dict[str, Any]:
         """Định tuyến lấy hàng Đa Nguồn (Multi-Source Failover):
-        1. Ưu tiên lấy từ Nguồn 1 (@ProdSellerBot) nếu còn hàng.
+        1. Ưu tiên lấy từ Nguồn 1 (@ProdSellerBot đối với SP chung/ProdSeller, hoặc @DanteHubBot đối với SP độc quyền DanteHub) nếu còn hàng.
         2. Nếu Nguồn 1 hết hàng, thiếu số lượng hoặc gặp lỗi API đột xuất, tự động chuyển sang
            rút Key từ các Nguồn Dự Phòng (Kho Key nội bộ hoặc @DanteHubBot / API nguồn phụ, ưu tiên giá vốn rẻ nhất).
         """
         pid = str(product["id"])
+        is_dante_primary = product.get("provider") == "dantehub" or pid.startswith("dh_")
         qty = max(1, int(quantity))
         unit_cost_usd = float(product.get("price", 0.0) or 0.0)
         primary_unit_cost_vnd = db.compute_wholesale_vnd(unit_cost_usd)
@@ -678,37 +861,70 @@ class ProdSellerClient:
 
         rem_qty = qty
 
-        # Bước 1: Thử lấy từ Nguồn 1 (@ProdSellerBot) nếu Nguồn 1 báo còn hàng
+        # Bước 1: Thử lấy từ Nguồn 1 nếu Nguồn 1 báo còn hàng
         if want_primary > 0:
             try:
-                p_resp = await self.create_order(
-                    product_id=pid,
-                    quantity=want_primary,
-                    email=email,
-                    idempotency_key=idempotency_key,
-                )
-                p_keys: list[str] = []
-                if p_resp.get("deliveredKeys"):
-                    p_keys = [str(k) for k in p_resp["deliveredKeys"]]
-                elif p_resp.get("deliveredKey"):
-                    p_keys = [str(p_resp["deliveredKey"])]
+                if is_dante_primary:
+                    dh_uuid = str(product.get("dante_uuid") or pid).strip()
+                    dh_key = db.get_setting("dante_api_key", self.dante_api_key) or self.dante_api_key
+                    dh_url = db.get_setting("dante_base_url", self.dante_base_url) or self.dante_base_url
+                    p_resp = await self.create_external_api_order(
+                        api_base_url=dh_url,
+                        api_key=dh_key,
+                        remote_product_id=dh_uuid,
+                        quantity=want_primary,
+                        email=email,
+                        idempotency_key=idempotency_key,
+                    )
+                    p_keys: list[str] = []
+                    if p_resp.get("deliveredKeys"):
+                        p_keys = [str(k) for k in p_resp["deliveredKeys"]]
+                    elif p_resp.get("deliveredKey"):
+                        p_keys = [str(p_resp["deliveredKey"])]
 
-                ps_order_id = str(p_resp.get("orderId", ""))
-                p_status = str(p_resp.get("status", "delivered"))
-                p_amt_usd = float(p_resp.get("amount", unit_cost_usd * want_primary))
-                p_cost_vnd = db.compute_wholesale_vnd(p_amt_usd)
+                    oid = str(p_resp.get("orderId", ""))
+                    ps_order_id = f"DANTE_{oid}" if oid else ""
+                    p_status = str(p_resp.get("status", "delivered")).lower()
+                    p_amt_usd = float(p_resp.get("amount", 0.0) or (unit_cost_usd * want_primary))
+                    p_cost_vnd = db.compute_wholesale_vnd(p_amt_usd)
 
-                all_keys.extend(p_keys)
-                total_actual_cost_vnd += p_cost_vnd
-                source_parts.append(f"ProdSeller (x{want_primary})")
-                if p_status == "paid" and not p_keys:
-                    final_status = "paid"
-                    rem_qty -= want_primary
+                    all_keys.extend(p_keys)
+                    total_actual_cost_vnd += p_cost_vnd
+                    source_parts.append(f"DanteHub (x{want_primary})")
+                    if p_status in ("paid", "processing", "pending") and not p_keys:
+                        final_status = "paid"
+                        rem_qty -= want_primary
+                    else:
+                        rem_qty -= len(p_keys) if p_keys else want_primary
                 else:
-                    rem_qty -= len(p_keys) if p_keys else want_primary
+                    p_resp = await self.create_order(
+                        product_id=pid,
+                        quantity=want_primary,
+                        email=email,
+                        idempotency_key=idempotency_key,
+                    )
+                    p_keys = []
+                    if p_resp.get("deliveredKeys"):
+                        p_keys = [str(k) for k in p_resp["deliveredKeys"]]
+                    elif p_resp.get("deliveredKey"):
+                        p_keys = [str(p_resp["deliveredKey"])]
+
+                    ps_order_id = str(p_resp.get("orderId", ""))
+                    p_status = str(p_resp.get("status", "delivered"))
+                    p_amt_usd = float(p_resp.get("amount", unit_cost_usd * want_primary))
+                    p_cost_vnd = db.compute_wholesale_vnd(p_amt_usd)
+
+                    all_keys.extend(p_keys)
+                    total_actual_cost_vnd += p_cost_vnd
+                    source_parts.append(f"ProdSeller (x{want_primary})")
+                    if p_status == "paid" and not p_keys:
+                        final_status = "paid"
+                        rem_qty -= want_primary
+                    else:
+                        rem_qty -= len(p_keys) if p_keys else want_primary
             except Exception as exc:
                 last_primary_err = exc
-                logging.warning("Nguồn 1 ProdSeller lỗi khi mua %s (x%s), chuyển sang Nguồn Dự Phòng: %s", pid, want_primary, exc)
+                logging.warning("Nguồn 1 lỗi khi mua %s (x%s), chuyển sang Nguồn Dự Phòng: %s", pid, want_primary, exc)
 
         # Bước 2: Bù số lượng còn thiếu từ các Nguồn Dự Phòng (ưu tiên giá vốn thấp nhất trước)
         popped_rollback_log: list[tuple[int, list[str]]] = []
@@ -776,7 +992,7 @@ class ProdSellerClient:
                         logging.warning("Nguồn API dự phòng %s (#%s) lỗi: %s", sname, sid, ext_exc)
 
         if rem_qty > 0:
-            # Nếu chưa mua được gì từ ProdSeller mà kho dự phòng cũng không đủ -> trả lại key dự phòng vào kho và báo lỗi
+            # Nếu chưa mua được gì từ Nguồn 1 mà kho dự phòng cũng không đủ -> trả lại key dự phòng vào kho và báo lỗi
             if len(all_keys) == sum(len(klist) for _, klist in popped_rollback_log) and final_status != "paid":
                 for sid, klist in popped_rollback_log:
                     db.restore_backup_keys(sid, klist)
@@ -795,7 +1011,7 @@ class ProdSellerClient:
             "orderId": ps_order_id,
             "status": final_status,
             "actual_cost_vnd": total_actual_cost_vnd or (primary_unit_cost_vnd * qty),
-            "source_summary": " + ".join(source_parts) if source_parts else "ProdSeller",
+            "source_summary": " + ".join(source_parts) if source_parts else ("DanteHub" if is_dante_primary else "ProdSeller"),
             "used_backup": used_backup,
         }
 
