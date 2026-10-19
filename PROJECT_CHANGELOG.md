@@ -5,6 +5,22 @@
 
 ---
 
+## [v2.9.1] - 2026-10-19: Giao Diện Lưới Thương Hiệu 2–3 Cột (Brand Grid UI) — Chỉ Hiển Thị `Icon + Tên Sản Phẩm`, Giá Bán Hiển Thị Khi Xem Chi Tiết
+
+### 🎨 1. Bảng Lưới Thương Hiệu 2–3 Cột Chuẩn Mực (`prodseller_client.py` & `bot.py`)
+- **Thiết kế lại `render_products_menu` dạng Bảng Lưới 2–3 cột (`BRAND_GRID_ROWS`):**
+  - Sắp xếp 65+ thương hiệu phần mềm/AI (`ChatGPT`, `Gemini`, `Claude`, `Notion`, `Cursor`, `CapCut`, `Canva`, `YouTube`, `Spotify`, `Netflix`, `Adobe`, `Microsoft`, `Figma`, `Grammarly`, `Duolingo`, `ElevenLabs`, `Lovable`, `Coursera`, `Bolt`, `Gamma`, `Kling`, `Leonardo`, `Manus`, `Muse AI`, `Replit`, `Wispr Flow`, `Apple`, `Apple Music`, `MiniMax`, `NordVPN`, `VPN`, `Udemy`, `Higgsfield`, `Intercom`, `Suno`, `Surfshark`, `TV360`, `X`, `Autodesk`, `Descript`, `Discord Nitro`, `Facebook`, `Framer`, `Granola`, `Gumloop`, `HBO Max`, `HeyGen`, `Groq`, `Grok`, `JetBrains`, `Krea`, `Linear`, `LinkedIn`, `Make`, `Malwarebytes`, `Medium`, `Miro`, `n8n`, `Perplexity`, `Picsart`, `PlayStation`, `PostHog`, `Quizlet`, `Raycast`, `Riot Games`, `Scribd`, `Singular`, `SketchUp`, `Superhuman`, `Supabase`, `Tinder`, `TradingView`, `TypingMind`, `Veeam`, `Vercel`, `VidIQ`, `VieON`, `Voicemod`, `Warp`, `Webflow`...) thành các hàng ngang 2–3 nút bấm cân đối như ảnh mẫu của chủ shop.
+  - Nút thương hiệu đang sẵn hàng dùng kiểu trong suốt mặc định của Telegram (`style=None`), nút tạm hết sạch cả 2 kho hiển thị màu đỏ (`style="danger"`).
+  - Tích hợp trọn bộ **60+ Custom Emoji ID chính gốc (`GROUP_ICONS`)** kèm bộ Icon Emoji dự phòng (`GROUP_EMOJI`).
+
+### 🏷️ 2. Tối Giản Nút Bấm (`Icon + Tên SP`) & Hiển Thị Giá Khi Xem Trực Tiếp (`render_product_detail`)
+- **Loại bỏ hoàn toàn giá tiền và số lượng gói khỏi nút bấm bên ngoài:**
+  - Trên cả Bảng Lưới Thương Hiệu lẫn Danh sách gói con bên trong từng thương hiệu, mỗi nút bấm chỉ hiển thị **`Icon + Tên Sản Phẩm`** giúp giao diện thoáng, sạch sẽ, không bị rối mắt khi kho hàng lên tới 143 sản phẩm.
+  - **Mở thẳng 1 chạm (`1-Click Direct Detail`):** Nếu một thương hiệu chỉ có duy nhất 1 gói sản phẩm (ví dụ `Netflix`, `YouTube`, `Spotify`, `Coursera`...), khi khách bấm vào nút thương hiệu trên bảng lưới, Bot sẽ mở thẳng trang chi tiết sản phẩm kèm giá bán VNĐ ngay lập tức (và nút `« Quay lại` sẽ đưa khách về thẳng Bảng Lưới Thương Hiệu).
+  - **Trang chi tiết sản phẩm (`render_product_detail`):** Hiển thị đầy đủ tên gói, mô tả quyền lợi, **Giá bán VNĐ (`💵 Giá bán: XX,XXXđ`)**, ưu đãi Hạng VIP, nút áp mã giảm giá (Voucher) và nút chọn số lượng mua (`1x`, `2x`, `5x`, `10x`).
+
+---
+
 ## [v2.9.0] - 2026-10-19: Hợp Nhất Toàn Bộ Kho Hàng `@ProdSellerBot` + `@DanteHubBot` (143 Sản Phẩm — Gộp Chung 21 SP Trùng & Mở Bán 102 SP Độc Quyền)
 
 ### 🛍️ 1. Hợp nhất danh mục 2 nguồn thành Siêu Kho Hàng 143 Sản Phẩm (`prodseller_client.py`)

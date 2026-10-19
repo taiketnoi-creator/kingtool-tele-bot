@@ -29,6 +29,7 @@ from telethon import Button, TelegramClient, events
 from database import TIER_DISCOUNTS, VN_TZ, Database
 from i18n import LANGUAGES, localize_product_description, t
 from prodseller_client import (
+    BRAND_GRID_ROWS,
     DANTE_BASE_URL,
     GROUP_EMOJI,
     GROUP_ICONS,
@@ -171,10 +172,9 @@ async def send_or_edit(event: Any, text: str, buttons: list[list[Any]] | None = 
     return await event.respond(text, buttons=buttons)
 
 
-# ==================== PRODUCTS & SUB-PLANS (HIỂN THỊ VNĐ — HỢP NHẤT 142+ SP) ====================
+# ==================== PRODUCTS & SUB-PLANS (BẢNG LƯỚI 2-3 CỘT: ICON + TÊN SP, GIÁ HIỂN THỊ KHI BẤM VÀO CHI TIẾT) ====================
 async def render_products_menu(event: Any, group_filter: str | None = None, page: int = 0) -> None:
     u, lang = await get_user_info(event)
-    tier = u.get("tier", "bronze")
     try:
         products = await ps_client.sync_products(force=False)
     except Exception as exc:
@@ -186,79 +186,55 @@ async def render_products_menu(event: Any, group_filter: str | None = None, page
     overrides = db.get_all_overrides()
     backup_map = db.get_all_backup_sources()
     rows: list[list[Any]] = []
-    seen_groups: set[str] = set()
 
     group_stats: dict[str, dict[str, int]] = {}
     visible_products: list[dict[str, Any]] = []
-    total_in_stock = 0
 
     for p in products:
         ov = overrides.get(p["id"], {})
         if ov.get("hidden"):
             continue
         visible_products.append(p)
-        eff_stock, eff_in_stock, _, _ = db.get_effective_product_stock(p, backup_map)
-        if eff_in_stock:
-            total_in_stock += 1
+        _, eff_in_stock, _, _ = db.get_effective_product_stock(p, backup_map)
         g = detect_plan_group(p["name"], p.get("category", ""))
-        if g:
-            st = group_stats.setdefault(g, {"plans": 0, "stock": 0})
-            st["plans"] += 1
-            if eff_in_stock and isinstance(eff_stock, int):
-                st["stock"] += eff_stock
+        st = group_stats.setdefault(g, {"plans": 0, "in_stock": 0})
+        st["plans"] += 1
+        if eff_in_stock:
+            st["in_stock"] += 1
 
     owner_premium = os.getenv("OWNER_HAS_PREMIUM", "false").lower()
     use_fallback = owner_premium != "true"
 
     if not group_filter:
-        all_lbl = (
-            f"📋 Xem Tất Cả {len(visible_products)} Sản Phẩm ({total_in_stock} sẵn hàng) »"
-            if lang == "vi"
-            else f"📋 View All {len(visible_products)} Products ({total_in_stock} in stock) »"
-        )
-        rows.append([Button.inline(all_lbl, b"grp:__ALL__:0", style="success")])
+        rendered_brands: set[str] = set()
 
-        for p in visible_products:
-            pid = p["id"]
-            g = detect_plan_group(p["name"], p.get("category", ""))
-            if g:
-                if g not in seen_groups:
-                    seen_groups.add(g)
-                    st = group_stats[g]
-                    grp_emoji = GROUP_EMOJI.get(g, "📂 ") if use_fallback else ""
-                    label = f"{grp_emoji}{g} ▸ {st['plans']} {t(lang, 'plans_label')} ({st['stock']}) »"
-                    grp_icon = GROUP_ICONS.get(g)
-                    rows.append([
-                        Button.inline(
-                            label,
-                            f"grp:{g}:0".encode(),
-                            style="primary",
-                            icon=grp_icon,
-                        )
-                    ])
-                continue
-
-            eff_stock, in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
-            _, unit_vnd, _ = db.compute_tier_unit_price(
-                pid,
-                float(p["price"]),
-                tier,
-                overrides,
-                primary_stock=primary_stock,
-                backup_map=backup_map,
+        def _make_brand_btn(brand: str) -> Any:
+            st = group_stats[brand]
+            has_stock = st["in_stock"] > 0
+            grp_icon = GROUP_ICONS.get(brand)
+            grp_emoji = GROUP_EMOJI.get(brand, "") if (use_fallback or grp_icon is None) else ""
+            lbl = f"{grp_emoji}{brand}"
+            return Button.inline(
+                lbl,
+                f"grp:{brand}:0".encode(),
+                style=None if has_stock else "danger",
+                icon=grp_icon,
             )
-            badge = stock_badge(eff_stock, in_stock)
-            icon_id, prefix = get_product_icon_and_prefix(p["name"], use_fallback_emoji=use_fallback)
-            btn_style = "success" if in_stock else "danger"
-            btn_label = f"{prefix}{p['name'].strip()} | {unit_vnd:,}đ | {badge}"
-            rows.append([
-                Button.inline(
-                    btn_label,
-                    f"prd:{pid}".encode(),
-                    style=btn_style,
-                    icon=icon_id,
-                )
-            ])
+
+        for grid_row in BRAND_GRID_ROWS:
+            active_in_row = [b for b in grid_row if b in group_stats]
+            if active_in_row:
+                rows.append([_make_brand_btn(b) for b in active_in_row])
+                rendered_brands.update(active_in_row)
+
+        extra_brands = [b for b in group_stats if b not in rendered_brands]
+        for i in range(0, len(extra_brands), 3):
+            chunk = extra_brands[i : i + 3]
+            rows.append([_make_brand_btn(b) for b in chunk])
+
+        all_lbl = "🗂 Tất cả sản phẩm" if lang == "vi" else "🗂 All products"
+        rows.append([Button.inline(all_lbl, b"grp:__ALL__:0")])
+        rows.append([Button.inline(t(lang, "btn_back"), b"menu:home", icon=5257963315258204021)])
     else:
         filtered: list[dict[str, Any]] = []
         for p in visible_products:
@@ -268,6 +244,11 @@ async def render_products_menu(event: Any, group_filter: str | None = None, page
                 g = detect_plan_group(p["name"], p.get("category", ""))
                 if g == group_filter:
                     filtered.append(p)
+
+        # Nếu thương hiệu đó chỉ có duy nhất 1 sản phẩm -> mở thẳng chi tiết sản phẩm kèm giá bán ngay!
+        if group_filter != "__ALL__" and len(filtered) == 1:
+            await render_product_detail(event, filtered[0]["id"], qty=1, back_to_grid=True)
+            return
 
         # Ưu tiên hiển thị sản phẩm đang sẵn hàng lên đầu danh mục
         filtered.sort(key=lambda item: (0 if db.get_effective_product_stock(item, backup_map)[1] else 1))
@@ -282,19 +263,11 @@ async def render_products_menu(event: Any, group_filter: str | None = None, page
 
         for p in sliced:
             pid = p["id"]
-            eff_stock, in_stock, primary_stock, _ = db.get_effective_product_stock(p, backup_map)
-            _, unit_vnd, _ = db.compute_tier_unit_price(
-                pid,
-                float(p["price"]),
-                tier,
-                overrides,
-                primary_stock=primary_stock,
-                backup_map=backup_map,
-            )
-            badge = stock_badge(eff_stock, in_stock)
+            _, in_stock, _, _ = db.get_effective_product_stock(p, backup_map)
             icon_id, prefix = get_product_icon_and_prefix(p["name"], use_fallback_emoji=use_fallback)
-            btn_style = "success" if in_stock else "danger"
-            btn_label = f"{prefix}{p['name'].strip()} | {unit_vnd:,}đ | {badge}"
+            btn_style = None if in_stock else "danger"
+            # Chỉ hiển thị Icon + Tên sản phẩm gọn đẹp, không kèm giá tiền trên nút bấm
+            btn_label = f"{prefix}{p['name'].strip()}"
             rows.append([
                 Button.inline(
                     btn_label,
@@ -313,20 +286,27 @@ async def render_products_menu(event: Any, group_filter: str | None = None, page
                 nav_row.append(Button.inline("Trang sau ➡️", f"grp:{group_filter}:{page + 1}".encode()))
             rows.append(nav_row)
 
-    back_target = b"menu:products" if group_filter else b"menu:home"
-    rows.append([Button.inline(t(lang, "btn_back"), back_target)])
+        rows.append([
+            Button.inline(t(lang, "btn_back"), b"menu:products", icon=5346112927688574301),
+            Button.inline("🏠 Menu", b"menu:home", icon=5257963315258204021),
+        ])
 
     header = t(lang, "products_title")
     if group_filter == "__ALL__":
-        header = f"{header}\n\n📋 **Tất cả sản phẩm ({len(visible_products)} SP)**"
+        header = f"🛍️ **Tất cả sản phẩm ({len(visible_products)} SP)**\nChọn một sản phẩm bên dưới để xem chi tiết & giá bán:"
     elif group_filter:
-        grp_emoji = GROUP_EMOJI.get(group_filter, "📂 ")
-        header = f"{header}\n\n{grp_emoji}**{group_filter}**"
+        grp_emoji = GROUP_EMOJI.get(group_filter, "🛍️ ")
+        header = f"{grp_emoji}**{group_filter}**\nChọn gói sản phẩm bên dưới để xem chi tiết & giá bán:"
 
     await send_or_edit(event, header, buttons=rows)
 
 
-async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> None:
+async def render_product_detail(
+    event: Any,
+    product_id: str,
+    qty: int = 1,
+    back_to_grid: bool = False,
+) -> None:
     u, lang = await get_user_info(event)
     uid = u["telegram_id"]
     tier = u.get("tier", "bronze")
@@ -407,7 +387,18 @@ async def render_product_detail(event: Any, product_id: str, qty: int = 1) -> No
     )
 
     grp = detect_plan_group(p["name"], p.get("category", ""))
-    back_cb = f"grp:{grp}:0".encode() if grp else b"menu:products"
+    if back_to_grid:
+        back_cb = b"menu:products"
+    else:
+        all_prods = ps_client._products_cache
+        overrides_map = db.get_all_overrides()
+        same_grp_cnt = sum(
+            1
+            for item in all_prods
+            if not overrides_map.get(item["id"], {}).get("hidden")
+            and detect_plan_group(item["name"], item.get("category", "")) == grp
+        )
+        back_cb = f"grp:{grp}:0".encode() if (grp and same_grp_cnt > 1) else b"menu:products"
 
     rows: list[list[Any]] = []
     if in_stock and (stock_num is None or stock_num >= 1):

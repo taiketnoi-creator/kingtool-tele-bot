@@ -45,110 +45,253 @@ EXTRA_SKIP_DANTE_IDS: set[str] = {
     "b665a651-4c58-4b3d-91ec-4692724a5031",  # Test API for Developers ($0.01)
 }
 
-# Custom Emoji Icon IDs + Unicode Icons cho từng nhóm và từng sản phẩm
+# Bố cục Bảng Lưới Thương Hiệu (2-3 cột) chuẩn đẹp, gọn gàng, chỉ hiển thị Icon + Tên Thương Hiệu
+BRAND_GRID_ROWS: list[list[str]] = [
+    ["ChatGPT", "Gemini", "Claude"],
+    ["Notion", "Cursor"],
+    ["CapCut", "Canva", "YouTube"],
+    ["Spotify", "Netflix", "Adobe"],
+    ["Microsoft", "Figma", "Grammarly"],
+    ["Duolingo", "ElevenLabs", "Lovable"],
+    ["Coursera", "Bolt", "Gamma"],
+    ["Kling", "Leonardo", "Manus"],
+    ["Muse AI", "Replit", "Wispr Flow"],
+    ["Apple", "Apple Music", "MiniMax"],
+    ["NordVPN", "VPN", "Udemy"],
+    ["Higgsfield", "Intercom", "Suno"],
+    ["Surfshark", "TV360", "X"],
+    ["Autodesk", "Descript"],
+    ["Discord Nitro", "Facebook"],
+    ["Framer", "Granola"],
+    ["Gumloop", "HBO Max", "HeyGen"],
+    ["n8n", "Pangram", "PostHog"],
+    ["Proton", "PureVPN", "Quizlet"],
+    ["Resend", "Seedance"],
+    ["Magic Patterns", "Amazon Prime"],
+    ["Grok", "Meitu"],
+    ["JetBrains", "Linear Business"],
+    ["Scribd", "Gmail", "Outlook"],
+    ["Telegram", "iLovePDF", "Miro"],
+    ["edX", "Supercut"],
+]
+
+# Custom Emoji Icon IDs chính thức cho từng Thương hiệu trên lưới (trích xuất từ DanteHub & ProdSeller)
 GROUP_ICONS: dict[str, int] = {
-    "ChatGPT & OpenAI": 5796185041717433060,
-    "Claude AI": 6174520215376763867,
-    "Gemini & Google AI": 5206660927339924387,
-    "Cursor & Grok AI": 5300959605793235101,
-    "Kling, Suno & Video AI": 5891219692881714411,
-    "Leonardo, Gamma & Ảnh AI": 5393312805795407636,
-    "ElevenLabs & Giọng Nói AI": 6219689196722854904,
-    "MiniMax & Muse AI": 5891219692881714411,
-    "Lovable, n8n & Dev Tools": 5300959605793235101,
-    "Canva": 5879982576671657703,
-    "CapCut": 6124915477706705232,
-    "Figma, Adobe & Thiết Kế": 6145685845060883545,
-    "Office 365, Notion & Văn Phòng": 6102808052673548025,
-    "YouTube, Netflix & Giải Trí": 5926990577114550753,
-    "Duolingo, Coursera & Học Tập": 5796371348808799072,
-    "VPN & Bảo Mật": 5350619413533958825,
-    "Gmail, Outlook & MXH": 5307602416961609760,
+    "ChatGPT": 5359726582447487916,
+    "Gemini": 5420321583082271289,
+    "Claude": 5818875276632792408,
+    "Notion": 5821216948637146322,
+    "Cursor": 5821051862979189629,
+    "CapCut": 5821405789759217281,
+    "Canva": 5111661409008092227,
+    "YouTube": 5821118958958288159,
+    "Spotify": 5821077628487998971,
+    "Netflix": 5796522630441867305,
+    "Adobe": 5821103922277784849,
+    "Microsoft": 5821187618305481269,
+    "Figma": 5301188664989065552,
+    "Grammarly": 5820956592014630083,
+    "Duolingo": 6023922371168047961,
+    "ElevenLabs": 5821026106060317259,
+    "Lovable": 6104729848675050039,
+    "Coursera": 5821240446403223107,
+    "Bolt": 5098108691245172117,
+    "Gamma": 5823214520746648115,
+    "Kling": 6177161027558316737,
+    "Leonardo": 6133975818591805751,
+    "Manus": 6041825714708166055,
+    "Muse AI": 5891219692881714411,
+    "Replit": 6105050957609968229,
+    "Wispr Flow": 6296312164902772523,
+    "Apple": 5398012024003246287,
+    "Apple Music": 5346251367369425932,
+    "MiniMax": 6320826657112333009,
+    "NordVPN": 5796345694969140339,
+    "VPN": 5239963889004732575,
+    "Udemy": 5046584798978507767,
+    "Higgsfield": 6201693472731176318,
+    "Intercom": 5163925843830900265,
+    "Suno": 6174584936238947057,
+    "Surfshark": 5796592771552777710,
+    "TV360": 6167826551795623178,
+    "X": 5798726760413532673,
+    "Autodesk": 6305045014531548800,
+    "Descript": 6131913864922537306,
+    "Discord Nitro": 5300896830551254527,
+    "Facebook": 6138685684023562338,
+    "Framer": 6312056780570499991,
+    "Granola": 6131964704450420501,
+    "Gumloop": 6312109063207394541,
+    "HBO Max": 4902595693962593676,
+    "HeyGen": 6318628415540829579,
+    "n8n": 5823564886998785671,
+    "Pangram": 6131913220677446101,
+    "PostHog": 6312227612894700005,
+    "Proton": 5796504385420792898,
+    "Quizlet": 6131880321227957937,
+    "Resend": 5789545215551349573,
+    "Magic Patterns": 6296056098952584106,
+    "Amazon Prime": 6084483883942811660,
+    "Grok": 5440892071248431491,
+    "JetBrains": 5300959605793235101,
+    "Linear Business": 6312267027809574565,
+    "Scribd": 5098264774651675823,
+    "Gmail": 5307602416961609760,
+    "Outlook": 5796683820564484775,
+    "iLovePDF": 6239983230729068544,
+    "edX": 5769598970816897041,
 }
 
 GROUP_EMOJI: dict[str, str] = {
-    "ChatGPT & OpenAI": "🤖 ",
-    "Claude AI": "🧠 ",
-    "Gemini & Google AI": "✨ ",
-    "Cursor & Grok AI": "⚡ ",
-    "Kling, Suno & Video AI": "🎥 ",
-    "Leonardo, Gamma & Ảnh AI": "🖼️ ",
-    "ElevenLabs & Giọng Nói AI": "🎙️ ",
-    "MiniMax & Muse AI": "🚀 ",
-    "Lovable, n8n & Dev Tools": "💻 ",
-    "Canva": "🎨 ",
+    "ChatGPT": "🤖 ",
+    "Gemini": "✨ ",
+    "Claude": "🧠 ",
+    "Notion": "📓 ",
+    "Cursor": "⚡ ",
     "CapCut": "🎬 ",
-    "Figma, Adobe & Thiết Kế": "📐 ",
-    "Office 365, Notion & Văn Phòng": "💼 ",
-    "YouTube, Netflix & Giải Trí": "🍿 ",
-    "Duolingo, Coursera & Học Tập": "🎓 ",
-    "VPN & Bảo Mật": "🛡️ ",
-    "Gmail, Outlook & MXH": "📧 ",
+    "Canva": "🎨 ",
+    "YouTube": "▶️ ",
+    "Spotify": "🎧 ",
+    "Netflix": "🍿 ",
+    "Adobe": "🅰️ ",
+    "Microsoft": "🪟 ",
+    "Figma": "📐 ",
+    "Grammarly": "✍️ ",
+    "Duolingo": "🦉 ",
+    "ElevenLabs": "🎙️ ",
+    "Lovable": "💖 ",
+    "Coursera": "🎓 ",
+    "Bolt": "⚡ ",
+    "Gamma": "📊 ",
+    "Kling": "🎥 ",
+    "Leonardo": "🖼️ ",
+    "Manus": "🤖 ",
+    "Muse AI": "🎵 ",
+    "Replit": "💻 ",
+    "Wispr Flow": "🗣️ ",
+    "Apple": "🍎 ",
+    "Apple Music": "🎵 ",
+    "MiniMax": "🚀 ",
+    "NordVPN": "🛡️ ",
+    "VPN": "🌐 ",
+    "Udemy": "🎓 ",
+    "Higgsfield": "🎞️ ",
+    "Intercom": "💬 ",
+    "Suno": "🎵 ",
+    "Surfshark": "🦈 ",
+    "TV360": "📺 ",
+    "X": "✖️ ",
+    "Autodesk": "📐 ",
+    "Descript": "🎬 ",
+    "Discord Nitro": "🎮 ",
+    "Facebook": "📘 ",
+    "Framer": "⚡ ",
+    "Granola": "🥣 ",
+    "Gumloop": "🔄 ",
+    "HBO Max": "🎞️ ",
+    "HeyGen": "🎭 ",
+    "n8n": "⚙️ ",
+    "Pangram": "📝 ",
+    "PostHog": "🦔 ",
+    "Proton": "🛡️ ",
+    "PureVPN": "🛡️ ",
+    "Quizlet": "🎓 ",
+    "Resend": "✉️ ",
+    "Seedance": "💃 ",
+    "Magic Patterns": "✨ ",
+    "Amazon Prime": "📺 ",
+    "Grok": "🔥 ",
+    "Meitu": "📸 ",
+    "JetBrains": "💻 ",
+    "Linear Business": "📋 ",
+    "Scribd": "📚 ",
+    "Gmail": "📧 ",
+    "Outlook": "📨 ",
+    "Telegram": "✈️ ",
+    "iLovePDF": "📄 ",
+    "Miro": "📝 ",
+    "edX": "🎓 ",
+    "Supercut": "🎬 ",
 }
 
 PRODUCT_KEYWORD_ICONS: list[tuple[str, int | None, str]] = [
-    ("spotify", 5926990577114550753, "🎧 "),
-    ("netflix", None, "🍿 "),
-    ("elevenlabs", 6219689196722854904, "🎙️ "),
-    ("eleven reader", 6219689196722854904, "🎙️ "),
+    ("spotify", 5821077628487998971, "🎧 "),
+    ("netflix", 5796522630441867305, "🍿 "),
+    ("elevenlabs", 5821026106060317259, "🎙️ "),
+    ("eleven reader", 5821026106060317259, "🎙️ "),
     ("gmail", 5307602416961609760, "📧 "),
-    ("scribd", None, "📚 "),
+    ("scribd", 5098264774651675823, "📚 "),
     ("muse ai", 5891219692881714411, "🎵 "),
-    ("minimax", 5891219692881714411, "🚀 "),
-    ("chatgpt", 5796185041717433060, "🤖 "),
-    ("codex", 5796185041717433060, "🤖 "),
-    ("claude", 6174520215376763867, "🧠 "),
-    ("cursor", 5300959605793235101, "⚡ "),
-    ("grok", None, "🔥 "),
-    ("kling", None, "🎥 "),
-    ("higgsfield", None, "🎥 "),
-    ("heygen", None, "🎥 "),
-    ("suno", 5891219692881714411, "🎵 "),
-    ("leonardo", None, "🖼️ "),
-    ("gamma", None, "📊 "),
-    ("lovable", None, "💖 "),
-    ("bolt", None, "⚡ "),
-    ("n8n", None, "🔄 "),
-    ("replit", None, "💻 "),
-    ("wispr", 6069015112549669594, "🗣️ "),
-    ("apple tv", 5469922901958346945, "🍎 "),
-    ("apple music", 5469922901958346945, "🍎 "),
-    ("duolingo", 5796371348808799072, "🦉 "),
-    ("coursera", 5769598970816897041, "🎓 "),
-    ("udemy", 5769598970816897041, "🎓 "),
-    ("quizlet", 5769598970816897041, "🎓 "),
-    ("capcut", 6124915477706705232, "🎬 "),
-    ("hbo", 5346319945112240722, "🎞️ "),
+    ("minimax", 6320826657112333009, "🚀 "),
+    ("chatgpt", 5359726582447487916, "🤖 "),
+    ("codex", 5359726582447487916, "🤖 "),
+    ("claude", 5818875276632792408, "🧠 "),
+    ("cursor", 5821051862979189629, "⚡ "),
+    ("grok", 5440892071248431491, "🔥 "),
+    ("kling", 6177161027558316737, "🎥 "),
+    ("higgsfield", 6201693472731176318, "🎞️ "),
+    ("heygen", 6318628415540829579, "🎭 "),
+    ("suno", 6174584936238947057, "🎵 "),
+    ("leonardo", 6133975818591805751, "🖼️ "),
+    ("gamma", 5823214520746648115, "📊 "),
+    ("lovable", 6104729848675050039, "💖 "),
+    ("bolt", 5098108691245172117, "⚡ "),
+    ("n8n", 5823564886998785671, "⚙️ "),
+    ("replit", 6105050957609968229, "💻 "),
+    ("wispr", 6296312164902772523, "🗣️ "),
+    ("apple tv", 5398012024003246287, "🍎 "),
+    ("apple music", 5346251367369425932, "🎵 "),
+    ("duolingo", 6023922371168047961, "🦉 "),
+    ("coursera", 5821240446403223107, "🎓 "),
+    ("udemy", 5046584798978507767, "🎓 "),
+    ("quizlet", 6131880321227957937, "🎓 "),
+    ("capcut", 5821405789759217281, "🎬 "),
+    ("supercut", 5821405789759217281, "🎬 "),
+    ("hbo", 4902595693962593676, "🎞️ "),
     ("telegram", None, "✈️ "),
-    ("x premium", None, "🐦 "),
-    ("facebook", None, "📘 "),
-    ("discord", None, "🎮 "),
+    ("x premium", 5798726760413532673, "✖️ "),
+    ("facebook", 6138685684023562338, "📘 "),
+    ("discord", 5300896830551254527, "🎮 "),
     ("autodesk", 6305045014531548800, "📐 "),
     ("framer", 6312056780570499991, "⚡ "),
     ("jetbrains", 5300959605793235101, "💻 "),
-    ("avira", 5350619413533958825, "🛡️ "),
-    ("kaspersky", 5350619413533958825, "🛡️ "),
-    ("nordvpn", 5350619413533958825, "🛡️ "),
-    ("surfshark", 5350619413533958825, "🛡️ "),
-    ("vpn", 5350619413533958825, "🛡️ "),
+    ("avira", 5239963889004732575, "🛡️ "),
+    ("kaspersky", 5239963889004732575, "🛡️ "),
+    ("nordvpn", 5796345694969140339, "🛡️ "),
+    ("surfshark", 5796592771552777710, "🦈 "),
+    ("proton", 5796504385420792898, "🛡️ "),
+    ("purevpn", 5239963889004732575, "🛡️ "),
+    ("vpn", 5239963889004732575, "🌐 "),
     ("edx", 5769598970816897041, "🎓 "),
-    ("gemini", 5206660927339924387, "✨ "),
-    ("figma", 5393312805795407636, "🎨 "),
+    ("gemini", 5420321583082271289, "✨ "),
+    ("figma", 5301188664989065552, "📐 "),
     ("miro", None, "📝 "),
     ("ilovepdf", 6239983230729068544, "📄 "),
-    ("grammarly", None, "✍️ "),
+    ("grammarly", 5820956592014630083, "✍️ "),
     ("outlook", 5796683820564484775, "📨 "),
     ("hotmail", 5796683820564484775, "📨 "),
-    ("adobe", 6145685845060883545, "🅰️ "),
-    ("notion", 5233464190441662039, "📓 "),
-    ("prime video", 6111801057061374810, "📺 "),
-    ("tv360", 6111801057061374810, "📺 "),
-    ("canva", 5879982576671657703, "🖌️ "),
-    ("office", 6102808052673548025, "💼 "),
-    ("microsoft", 6102808052673548025, "💼 "),
-    ("youtube", None, "▶️ "),
-    ("vidiq", None, "▶️ "),
-    ("hma", None, "🛡️ "),
+    ("adobe", 5821103922277784849, "🅰️ "),
+    ("notion", 5821216948637146322, "📓 "),
+    ("prime video", 6084483883942811660, "📺 "),
+    ("tv360", 6167826551795623178, "📺 "),
+    ("canva", 5111661409008092227, "🎨 "),
+    ("office", 5821187618305481269, "🪟 "),
+    ("microsoft", 5821187618305481269, "🪟 "),
+    ("youtube", 5821118958958288159, "▶️ "),
+    ("vidiq", 5821118958958288159, "▶️ "),
+    ("intercom", 5163925843830900265, "💬 "),
+    ("descript", 6131913864922537306, "🎬 "),
+    ("granola", 6131964704450420501, "🥣 "),
+    ("gumloop", 6312109063207394541, "🔄 "),
+    ("pangram", 6131913220677446101, "📝 "),
+    ("posthog", 6312227612894700005, "🦔 "),
+    ("resend", 5789545215551349573, "✉️ "),
+    ("seedance", None, "💃 "),
+    ("magic patterns", 6296056098952584106, "✨ "),
+    ("manus", 6041825714708166055, "🤖 "),
+    ("meitu", None, "📸 "),
+    ("linear", 6312267027809574565, "📋 "),
+    ("hma", 5239963889004732575, "🛡️ "),
 ]
 
 
@@ -163,44 +306,151 @@ def get_product_icon_and_prefix(product_name: str, use_fallback_emoji: bool = Fa
     return None, "📦 "
 
 
-def detect_plan_group(product_name: str, category: str = "") -> str | None:
-    """Phân nhóm thông minh toàn bộ 142+ sản phẩm của @ProdSellerBot và @DanteHubBot."""
-    low = f"{category} {product_name}".lower()
+def detect_plan_group(product_name: str, category: str = "") -> str:
+    """Ánh xạ mỗi sản phẩm về đúng Tên Thương Hiệu (Brand) trên Bảng Lưới 2-3 Cột."""
+    cat_low = (category or "").strip().lower()
+    name_low = (product_name or "").strip().lower()
+    low = f"{cat_low} {name_low}"
+
+    if cat_low == "grok" or "grok" in name_low:
+        return "Grok"
     if any(k in low for k in ("chatgpt", "codex", "openai")):
-        return "ChatGPT & OpenAI"
-    if "claude" in low:
-        return "Claude AI"
+        return "ChatGPT"
     if "gemini" in low:
-        return "Gemini & Google AI"
-    if any(k in low for k in ("cursor", "grok", "supergrok")):
-        return "Cursor & Grok AI"
-    if any(k in low for k in ("kling", "higgsfield", "heygen", "seedance", "suno", "descript", "vidiq")):
-        return "Kling, Suno & Video AI"
-    if any(k in low for k in ("leonardo", "gamma", "meitu", "magic patterns")):
-        return "Leonardo, Gamma & Ảnh AI"
-    if any(k in low for k in ("elevenlabs", "eleven reader", "wispr")):
-        return "ElevenLabs & Giọng Nói AI"
-    if any(k in low for k in ("minimax", "muse ai")):
-        return "MiniMax & Muse AI"
-    if any(k in low for k in ("lovable", "bolt", "replit", "jetbrains", "n8n", "linear", "gumloop", "posthog", "resend", "intercom", "pangram", "factory ai")):
-        return "Lovable, n8n & Dev Tools"
+        return "Gemini"
+    if "claude" in low:
+        return "Claude"
+    if "notion" in low:
+        return "Notion"
+    if "cursor" in low:
+        return "Cursor"
+    if "capcut" in low:
+        return "CapCut"
     if "canva" in low:
         return "Canva"
-    if any(k in low for k in ("capcut", "supercut")):
-        return "CapCut"
-    if any(k in low for k in ("figma", "adobe", "autodesk", "framer", "miro")):
-        return "Figma, Adobe & Thiết Kế"
-    if any(k in low for k in ("office", "microsoft 365", "notion", "grammarly", "ilovepdf", "scribd", "granola")):
-        return "Office 365, Notion & Văn Phòng"
-    if any(k in low for k in ("youtube", "netflix", "spotify", "apple tv", "apple music", "hbo", "prime video", "tv360", "discord")):
-        return "YouTube, Netflix & Giải Trí"
-    if any(k in low for k in ("duolingo", "coursera", "edx", "udemy", "quizlet")):
-        return "Duolingo, Coursera & Học Tập"
-    if any(k in low for k in ("vpn", "nordvpn", "surfshark", "kaspersky", "avira", "proton", "purevpn", "hma")):
-        return "VPN & Bảo Mật"
-    if any(k in low for k in ("gmail", "outlook", "hotmail", "telegram", "x premium", "facebook")):
-        return "Gmail, Outlook & MXH"
-    return None
+    if any(k in low for k in ("youtube", "vidiq")):
+        return "YouTube"
+    if "spotify" in low:
+        return "Spotify"
+    if "netflix" in low:
+        return "Netflix"
+    if "adobe" in low:
+        return "Adobe"
+    if any(k in low for k in ("microsoft", "office 365", "office 20")):
+        return "Microsoft"
+    if "figma" in low:
+        return "Figma"
+    if "grammarly" in low:
+        return "Grammarly"
+    if "duolingo" in low:
+        return "Duolingo"
+    if any(k in low for k in ("elevenlabs", "eleven reader")):
+        return "ElevenLabs"
+    if "lovable" in low:
+        return "Lovable"
+    if "coursera" in low:
+        return "Coursera"
+    if "bolt" in low:
+        return "Bolt"
+    if "gamma" in low:
+        return "Gamma"
+    if "kling" in low:
+        return "Kling"
+    if "leonardo" in low:
+        return "Leonardo"
+    if "manus" in low:
+        return "Manus"
+    if "muse ai" in low:
+        return "Muse AI"
+    if "replit" in low:
+        return "Replit"
+    if "wispr" in low:
+        return "Wispr Flow"
+    if "apple music" in low or cat_low == "apple":
+        return "Apple Music"
+    if "apple tv" in low:
+        return "Apple"
+    if "minimax" in low:
+        return "MiniMax"
+    if "nordvpn" in low:
+        return "NordVPN"
+    if "surfshark" in low:
+        return "Surfshark"
+    if "proton" in low:
+        return "Proton"
+    if "purevpn" in low:
+        return "PureVPN"
+    if any(k in low for k in ("vpn", "kaspersky", "avira", "hma")):
+        return "VPN"
+    if "udemy" in low:
+        return "Udemy"
+    if "higgsfield" in low:
+        return "Higgsfield"
+    if "intercom" in low:
+        return "Intercom"
+    if "suno" in low:
+        return "Suno"
+    if "tv360" in low:
+        return "TV360"
+    if "x premium" in low or cat_low == "x":
+        return "X"
+    if "autodesk" in low:
+        return "Autodesk"
+    if "descript" in low:
+        return "Descript"
+    if "discord" in low:
+        return "Discord Nitro"
+    if "facebook" in low:
+        return "Facebook"
+    if "framer" in low:
+        return "Framer"
+    if "granola" in low:
+        return "Granola"
+    if "gumloop" in low:
+        return "Gumloop"
+    if "hbo" in low:
+        return "HBO Max"
+    if "heygen" in low:
+        return "HeyGen"
+    if "n8n" in low:
+        return "n8n"
+    if "pangram" in low:
+        return "Pangram"
+    if "posthog" in low:
+        return "PostHog"
+    if "quizlet" in low:
+        return "Quizlet"
+    if "resend" in low:
+        return "Resend"
+    if "seedance" in low:
+        return "Seedance"
+    if "magic patterns" in low:
+        return "Magic Patterns"
+    if "prime video" in low or "amazon prime" in low:
+        return "Amazon Prime"
+    if "meitu" in low:
+        return "Meitu"
+    if "jetbrains" in low:
+        return "JetBrains"
+    if "linear" in low:
+        return "Linear Business"
+    if "scribd" in low:
+        return "Scribd"
+    if "gmail" in low:
+        return "Gmail"
+    if any(k in low for k in ("outlook", "hotmail")):
+        return "Outlook"
+    if "telegram" in low:
+        return "Telegram"
+    if "ilovepdf" in low:
+        return "iLovePDF"
+    if "miro" in low:
+        return "Miro"
+    if "edx" in low:
+        return "edX"
+    if "supercut" in low:
+        return "Supercut"
+    return (category or product_name.split()[0]).strip()
 
 
 def stock_badge(stock: int | None, in_stock: bool) -> str:
