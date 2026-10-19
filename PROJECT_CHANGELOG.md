@@ -5,6 +5,23 @@
 
 ---
 
+## [v2.9.4] - 2026-10-19: Hệ Thống Tự Động Thiết Kế & Đính Kèm Ảnh Poster HD Cho Bài Đăng Kênh (`@KingToolShopOfficial`)
+
+### 🎨 1. Bộ Engine Tạo Ảnh Poster Đồ Họa Động Trực Tiếp Trên RAM (`channel_graphics.py`)
+- **Thiết kế 4 mẫu Poster HD (`1280x720` / `1280x640`) phong cách Dark-Luxury Neon (`io.BytesIO` PNG, không lưu rác ổ cứng):**
+  1. **Poster Tiêu Điểm Sản Phẩm Hot (`generate_spotlight_banner`):** Tự động nhận diện màu sắc thương hiệu (`Canva` tím neon, `ChatGPT`/`Spotify` xanh ngọc lục bảo, `Netflix`/`YouTube` đỏ thẩm, `Claude` vàng kim, `Gemini`/`Cursor` xanh cyber...), vẽ huy hiệu Monogram thương hiệu, giá thị trường gạch ngang, giá ưu đãi VNĐ cỡ lớn và hộp mã giảm giá `TANTHU10`.
+  2. **Poster Bảng Giá & Kho Hàng (`generate_catalog_banner`):** Dàn trang lưới 2 cột × 4 hàng (8 sản phẩm nổi bật đang sẵn hàng) kèm thẻ giá VNĐ nổi bật, tổng số mặt hàng sẵn kho và dấu thời gian cập nhật thực tế.
+  3. **Poster Hóa Đơn Giao Dịch Thành Công (`generate_order_receipt_banner`):** Minh chứng giao dịch (Social Proof) hiển thị mã đơn `#Order_ID`, mã khách hàng ẩn danh (`6839***42`), tên gói sản phẩm, số lượng và tổng tiền thanh toán kèm tem xác thực `GIAO TỰ ĐỘNG 24/7`.
+  4. **Poster Thông Báo Hàng Về (`generate_restock_banner`):** Bảng thông báo các mặt hàng vừa bổ sung tồn kho kèm giá bán VNĐ.
+- **Tương thích Font chữ Tiếng Việt 100% trên cả Windows & Linux Render:** Tự động nạp font hệ thống hỗ trợ đầy đủ dấu Tiếng Việt (`Segoe UI` trên Windows, `DejaVuSans` trên Linux Render) kết hợp vẽ icon vector sắc nét (Vương miện, Tia sét, Dấu tích), triệt tiêu hoàn toàn lỗi ô vuông ký tự (`▯`).
+
+### 📢 2. Tích Hợp Gửi Kèm Ảnh Poster & Nút Bấm Inline Vào 4 Luồng Đăng Kênh (`bot.py`)
+- **Hàm gửi bài đa phương tiện an toàn (`_send_channel_post_with_banner`):**
+  - Tự động đính kèm ảnh poster (`file=banner_io`) cùng nội dung bài viết và hàng nút bấm Inline dẫn thẳng vào `@KingToolShop_bot`.
+  - Tự động giới hạn độ dài caption (`<= 1000` ký tự) tuân thủ quy chuẩn Photo Caption của Telegram (`1024` ký tự) và có cơ chế fallback gửi chữ thuần nếu kết nối media gặp sự cố.
+
+---
+
 ## [v2.9.3] - 2026-10-19: Kiểm Định Toàn Hệ Thống & Tối Ưu Tốc Độ Siêu Tốc Cho Kho Hàng 143+ Sản Phẩm (`1.59 ms` Render)
 
 ### ⚡ 1. Tối ưu Cơ Sở Dữ Liệu Đám Mây Supabase & Bộ Đệm RAM (`database.py`)

@@ -26,6 +26,12 @@ from typing import Any
 from dotenv import load_dotenv
 from telethon import Button, TelegramClient, events
 
+from channel_graphics import (
+    generate_catalog_banner,
+    generate_order_receipt_banner,
+    generate_restock_banner,
+    generate_spotlight_banner,
+)
 from database import TIER_DISCOUNTS, VN_TZ, Database
 from i18n import LANGUAGES, localize_product_description, t
 from prodseller_client import (
@@ -734,8 +740,25 @@ async def check_and_alert_low_prodseller_balance(client: TelegramClient) -> None
         logger.debug("Không thể kiểm tra cảnh báo số dư ProdSeller: %s", exc)
 
 
+async def _send_channel_post_with_banner(
+    client: TelegramClient,
+    channel_name: str,
+    text: str,
+    buttons: list[list[Any]],
+    banner_io: io.BytesIO | None = None,
+) -> Any:
+    """Gửi bài đăng kèm ảnh Banner HD (tự động cắt gọn caption <= 1000 ký tự và fallback sang text nếu lỗi ảnh)."""
+    if banner_io is not None:
+        try:
+            caption = text if len(text) <= 1000 else (text[:995].rsplit("\n", 1)[0] + "\n...")
+            return await client.send_message(channel_name, caption, file=banner_io, buttons=buttons)
+        except Exception as exc:
+            logger.debug("Fallback gửi text lên kênh (lỗi gửi kèm ảnh %s): %s", channel_name, exc)
+    return await client.send_message(channel_name, text, buttons=buttons)
+
+
 async def post_restock_notification(client: TelegramClient, restocked_items: list[dict[str, Any]]) -> None:
-    """Tự động đăng thông báo Hàng Về (Restock) lên kênh @KingToolShopOfficial kèm nút Mua Ngay."""
+    """Tự động đăng thông báo Hàng Về (Restock) kèm Banner HD lên kênh @KingToolShopOfficial."""
     try:
         if str(db.get_setting("restock_notify_enabled", "1") or "0").strip() != "1":
             return
@@ -749,11 +772,13 @@ async def post_restock_notification(client: TelegramClient, restocked_items: lis
             "━━━━━━━━━━━━━━━━━━━━",
         ]
         rows: list[list[Any]] = []
-        for p in restocked_items[:8]:
+        banner_tuples: list[tuple[str, int, str]] = []
+        for p in restocked_items[:6]:
             pid = p["id"]
             eff_stock, eff_in_stock, p_st, _ = db.get_effective_product_stock(p, backup_map)
             price_vnd = db.compute_retail_price(pid, float(p["price"]), overrides, primary_stock=p_st, backup_map=backup_map)
             st_txt = f"Còn {eff_stock} suất" if isinstance(eff_stock, int) and eff_stock > 0 else "Sẵn hàng"
+            banner_tuples.append((p["name"].strip(), price_vnd, st_txt))
             lines.append(
                 f"🟢 **{p['name'].strip()}**\n"
                 f"   💰 Giá: **`{price_vnd:,}đ`** — 📦 Kho: **{st_txt}**"
@@ -773,7 +798,12 @@ async def post_restock_notification(client: TelegramClient, restocked_items: lis
         ])
         lines.append("━━━━━━━━━━━━━━━━━━━━")
         lines.append("⚡ *Giao dịch tự động 100% — Nhận tài khoản/key ngay sau 2 giây!*")
-        await client.send_message(ch_name, "\n".join(lines), buttons=rows)
+        banner_io = None
+        try:
+            banner_io = generate_restock_banner(banner_tuples, bot_username=BOT_USERNAME_CACHE)
+        except Exception:
+            pass
+        await _send_channel_post_with_banner(client, ch_name, "\n".join(lines), rows, banner_io)
     except Exception as exc:
         logger.debug("Không thể đăng thông báo Restock lên kênh: %s", exc)
 
@@ -787,7 +817,7 @@ async def post_order_social_proof(
     total_vnd: int,
     product_id: str = "",
 ) -> int | None:
-    """Tự động đăng thông báo khách mua hàng thành công (ẩn danh ID) lên kênh @KingToolShopOfficial."""
+    """Tự động đăng thông báo khách mua hàng thành công kèm ảnh Biên Lai HD lên kênh @KingToolShopOfficial."""
     try:
         ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
         if not ch_name:
@@ -820,7 +850,19 @@ async def post_order_social_proof(
                 Button.url("🆘 Hỗ Trợ & Bảo Hành 24/7", f"https://t.me/{support_name}"),
             ],
         ]
-        msg = await client.send_message(ch_name, text, buttons=rows)
+        banner_io = None
+        try:
+            banner_io = generate_order_receipt_banner(
+                order_id=order_id,
+                masked_uid=masked_uid,
+                product_name=product_name,
+                qty=qty,
+                total_vnd=total_vnd,
+                bot_username=BOT_USERNAME_CACHE,
+            )
+        except Exception:
+            pass
+        msg = await _send_channel_post_with_banner(client, ch_name, text, rows, banner_io)
         return msg.id if msg else None
     except Exception as exc:
         logger.debug("Không thể đăng social proof lên kênh: %s", exc)
@@ -883,7 +925,7 @@ async def post_simulated_social_proof(client: TelegramClient) -> int | None:
 
 
 async def post_spotlight_to_channel(client: TelegramClient) -> int | None:
-    """Tự động chọn 1-2 Sản phẩm Hot đang sẵn hàng để đăng bài giới thiệu kèm nút Mua 1 chạm & Quà Tân Thủ."""
+    """Tự động chọn 1 Sản phẩm Hot đang sẵn hàng để đăng Poster HD kèm nút Mua 1 chạm & Quà Tân Thủ."""
     global _LAST_SPOTLIGHT_MSG_ID
     try:
         ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
@@ -922,9 +964,9 @@ async def post_spotlight_to_channel(client: TelegramClient) -> int | None:
 
         raw_desc = localize_product_description(pid, chosen.get("description") or "", "vi")
         desc_lines = [ln.strip() for ln in raw_desc.splitlines() if ln.strip() and not ln.strip().startswith("━")]
-        short_desc = "\n".join(desc_lines[:6])
-        if len(short_desc) > 420:
-            short_desc = short_desc[:417] + "..."
+        short_desc = "\n".join(desc_lines[:5])
+        if len(short_desc) > 340:
+            short_desc = short_desc[:337] + "..."
 
         price_block = (
             f"💵 Giá niêm yết: ~~`{base_vnd:,}đ`~~ ➡️ **Chỉ còn `{final_vnd:,}đ`** *(Khi áp mã `{gift_code}`)*"
@@ -971,7 +1013,21 @@ async def post_spotlight_to_channel(client: TelegramClient) -> int | None:
             except Exception:
                 pass
 
-        msg = await client.send_message(ch_name, text, buttons=rows)
+        banner_io = None
+        try:
+            banner_io = generate_spotlight_banner(
+                product_name=chosen["name"],
+                category=chosen.get("category", ""),
+                base_vnd=base_vnd,
+                final_vnd=final_vnd,
+                gift_code=gift_code,
+                stock_text=st_txt,
+                bot_username=BOT_USERNAME_CACHE,
+            )
+        except Exception as b_exc:
+            logger.debug("Lỗi tạo ảnh Spotlight Banner: %s", b_exc)
+
+        msg = await _send_channel_post_with_banner(client, ch_name, text, rows, banner_io)
         if msg:
             _LAST_SPOTLIGHT_MSG_ID = msg.id
         return msg.id if msg else None
@@ -981,7 +1037,7 @@ async def post_spotlight_to_channel(client: TelegramClient) -> int | None:
 
 
 async def post_catalog_to_channel(client: TelegramClient, pin: bool = True, delete_old: bool = True) -> int | None:
-    """Tổng hợp bảng giá VNĐ + tồn kho toàn bộ sản phẩm đang bán và đăng lên @KingToolShopOfficial."""
+    """Tổng hợp bảng giá VNĐ + tồn kho kèm Banner Bảng Giá HD và đăng lên @KingToolShopOfficial."""
     ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
     support_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
     products = await ps_client.sync_products(force=False)
@@ -989,6 +1045,7 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True, dele
     backup_map = db.get_all_backup_sources()
 
     in_stock_lines: list[str] = []
+    featured_tuples: list[tuple[str, int, str]] = []
     for p in products:
         pid = p["id"]
         ov = overrides.get(pid, {})
@@ -998,28 +1055,31 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True, dele
         if not eff_in_stock:
             continue
         price_vnd = db.compute_retail_price(pid, float(p["price"]), overrides, primary_stock=p_st, backup_map=backup_map)
-        st_txt = f"Còn {eff_st}" if isinstance(eff_st, int) and eff_st > 0 else "Sẵn hàng"
-        in_stock_lines.append(f"🟢 **{p['name'].strip()}** — `{price_vnd:,}đ` *({st_txt})*")
+        st_txt = f"Còn {eff_st} suất" if isinstance(eff_st, int) and eff_st > 0 else "Sẵn hàng"
+        featured_tuples.append((p["name"].strip(), price_vnd, st_txt))
+        in_stock_lines.append(f"🟢 **{p['name'].strip()}** — `{price_vnd:,}đ`")
 
     now_vn_str = datetime.now(VN_TZ).strftime("%H:%M %d/%m/%Y")
     gift_code = db.get_setting("newbie_gift_voucher", "TANTHU10").strip().upper() or "TANTHU10"
-    catalog_block = "\n".join(in_stock_lines[:25]) if in_stock_lines else "Đang cập nhật kho hàng..."
+    total_avail = len(in_stock_lines)
+    catalog_block = "\n".join(in_stock_lines[:11]) if in_stock_lines else "Đang cập nhật kho hàng..."
+    if total_avail > 11:
+        catalog_block += f"\n✨ *...và hơn **{total_avail - 11} sản phẩm AI & Phần mềm khác** đang sẵn kho trong Bot!*"
+
     text = (
-        "👑 **KINGTOOL SHOP — HỆ THỐNG PHÂN PHỐI TÀI KHOẢN & KEY AI TỰ ĐỘNG 24/7** 👑\n"
-        f"🕒 *Cập nhật kho tự động lúc: `{now_vn_str}`*\n"
+        "👑 **KINGTOOL SHOP — HỆ THỐNG TÀI KHOẢN & KEY AI TỰ ĐỘNG 24/7** 👑\n"
+        f"🕒 *Cập nhật kho: `{now_vn_str}` — 🟢 Sẵn hàng: `{total_avail}+ SP`*\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        "✅ **Giao dịch tự động 100% qua Bot** — Nhận tài khoản/key ngay sau 2 giây!\n"
-        "✅ **Thanh toán VietQR nội địa** — Quét QR tự động điền số tiền & nội dung (+Thưởng nạp tới **10%**).\n"
-        "✅ **Bảo hành uy tín 1 chạm** — Đội ngũ CSKH hỗ trợ 24/7.\n"
-        f"🎁 **Ưu đãi Tân Thủ:** Tham gia kênh nhận ngay **Điểm thưởng + Mã `{gift_code}` (-10%)**!\n\n"
-        "🔥 **BẢNG GIÁ SẢN PHẨM ĐANG SẴN HÀNG:**\n"
+        "✅ **Giao dịch tự động 100%** — Nhận tài khoản/key sau **2 giây**!\n"
+        "✅ **Thanh toán VietQR nội địa** — Tự động cộng thưởng nạp tới **+10%**.\n"
+        f"🎁 **Ưu đãi Tân Thủ:** Nhận ngay **Điểm thưởng + Mã `{gift_code}` (-10%)**!\n\n"
+        "🔥 **TIÊU ĐIỂM SẢN PHẨM ĐANG SẴN HÀNG:**\n"
         f"{catalog_block}\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
-        f"🤖 **Bot mua hàng tự động:** @{BOT_USERNAME_CACHE}\n"
-        f"🆘 **Trung tâm Hỗ trợ CSKH:** @{support_name}"
+        f"🤖 **Mua tự động:** @{BOT_USERNAME_CACHE} | 🆘 **CSKH:** @{support_name}"
     )
     rows = [
-        [Button.url("🛒 MỞ BOT MUA HÀNG TỰ ĐỘNG NGAY", f"https://t.me/{BOT_USERNAME_CACHE}")],
+        [Button.url(f"🛒 MỞ BOT XEM TOÀN BỘ {total_avail}+ SẢN PHẨM", f"https://t.me/{BOT_USERNAME_CACHE}")],
         [Button.url(f"🎁 NHẬN QUÀ TÂN THỦ & MÃ GIẢM GIÁ ({gift_code})", f"https://t.me/{BOT_USERNAME_CACHE}?start=GIFT")],
         [Button.url("🆘 Trung Tâm Hỗ Trợ & Bảo Hành (CSKH)", f"https://t.me/{support_name}")],
     ]
@@ -1032,7 +1092,19 @@ async def post_catalog_to_channel(client: TelegramClient, pin: bool = True, dele
             except Exception:
                 pass
 
-    msg = await client.send_message(ch_name, text, buttons=rows)
+    banner_io = None
+    try:
+        banner_io = generate_catalog_banner(
+            featured_items=featured_tuples[:8],
+            total_in_stock=total_avail,
+            updated_str=now_vn_str,
+            gift_code=gift_code,
+            bot_username=BOT_USERNAME_CACHE,
+        )
+    except Exception as b_exc:
+        logger.debug("Lỗi tạo ảnh Catalog Banner: %s", b_exc)
+
+    msg = await _send_channel_post_with_banner(client, ch_name, text, rows, banner_io)
     if msg:
         db.set_setting("last_catalog_msg_id", str(msg.id))
         if pin:
