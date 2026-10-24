@@ -60,6 +60,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "newbie_gift_enabled": "1",          # Phễu nhận Quà Tân Thủ khi tham gia Kênh @KingToolShopOfficial (1=Bật, 0=Tắt)
     "newbie_gift_voucher": "TANTHU10",   # Mã giảm giá tặng Tân thủ khi tham gia Kênh (mặc định giảm 10%)
     "newbie_gift_points": "5",           # Số điểm thưởng tặng Tân thủ khi tham gia Kênh (mặc định +5 điểm)
+    "force_join_enabled": "1",           # Bắt buộc khách tham gia Kênh & Nhóm trước khi mua hàng / nạp tiền (1=Bật, 0=Tắt)
     "deposit_reminder_enabled": "1",     # Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút (1=Bật, 0=Tắt)
     "dante_base_url": "https://dantehub.shop/api/public/v1",  # URL API Nguồn 2 (@DanteHubBot)
     "dante_api_key": "",                 # API Key đối tác @DanteHubBot (dh_live_...)
@@ -244,6 +245,7 @@ class Database:
                     CREATE TABLE IF NOT EXISTS users (
                         telegram_id BIGINT PRIMARY KEY,
                         username TEXT DEFAULT '',
+                        full_name TEXT DEFAULT '',
                         balance NUMERIC(18, 2) DEFAULT 0.0,
                         points INTEGER DEFAULT 0,
                         tier TEXT DEFAULT 'bronze',
@@ -256,6 +258,7 @@ class Database:
                     );
 
                     ALTER TABLE users ADD COLUMN IF NOT EXISTS gift_claimed INTEGER DEFAULT 0;
+                    ALTER TABLE users ADD COLUMN IF NOT EXISTS full_name TEXT DEFAULT '';
 
                     CREATE TABLE IF NOT EXISTS product_overrides (
                         product_id TEXT PRIMARY KEY,
@@ -364,8 +367,24 @@ class Database:
                       )
                     """
                 )
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET full_name = username
+                    WHERE COALESCE(full_name, '') = '' AND COALESCE(username, '') != ''
+                    """
+                )
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET username = ''
+                    WHERE COALESCE(username, '') != ''
+                      AND username !~ '^[A-Za-z0-9_]{5,32}$'
+                    """
+                )
             self._migrate_sqlite_to_postgres_if_needed()
             self.warm_all_caches()
+            self._lock_and_recover_unpaid_orders_7047310836()
             logger.info("☁️ Đã kết nối cơ sở dữ liệu đám mây Supabase PostgreSQL (Schema: telebot) thành công!")
         else:
             with self._conn() as conn:
@@ -379,6 +398,7 @@ class Database:
                     CREATE TABLE IF NOT EXISTS users (
                         telegram_id INTEGER PRIMARY KEY,
                         username TEXT DEFAULT '',
+                        full_name TEXT DEFAULT '',
                         balance REAL DEFAULT 0.0,
                         points INTEGER DEFAULT 0,
                         tier TEXT DEFAULT 'bronze',
@@ -474,6 +494,16 @@ class Database:
                     conn.execute("ALTER TABLE users ADD COLUMN gift_claimed INTEGER DEFAULT 0")
                 except Exception:
                     pass
+                try:
+                    conn.execute("ALTER TABLE users ADD COLUMN full_name TEXT DEFAULT ''")
+                except Exception:
+                    pass
+                try:
+                    conn.execute(
+                        "UPDATE users SET full_name = username WHERE COALESCE(full_name, '') = '' AND COALESCE(username, '') != ''"
+                    )
+                except Exception:
+                    pass
                 for k, v in DEFAULT_SETTINGS.items():
                     conn.execute(
                         "INSERT OR IGNORE INTO settings (key, value) VALUES (?, ?)",
@@ -487,6 +517,52 @@ class Database:
                     (now_str(),),
                 )
             self.warm_all_caches()
+            self._lock_and_recover_unpaid_orders_7047310836()
+
+    def _lock_and_recover_unpaid_orders_7047310836(self) -> None:
+        """Thu hồi & khóa 2 đơn hàng chưa thanh toán (#3 và #4) của khách 7047310836,
+        đồng thời đưa 2 link kích hoạt vào kho dự phòng nội bộ (local_stock) để bảo toàn vốn cho Admin."""
+        try:
+            if self.get_setting("revoked_unpaid_7047310836_v1", "") == "1":
+                return
+            locked_msg = json.dumps(
+                ["🔒 Đã thu hồi link — Vui lòng nạp 101,000đ để mở khóa kích hoạt"],
+                ensure_ascii=False,
+            )
+            with self._conn() as conn:
+                conn.execute(
+                    """
+                    UPDATE orders
+                    SET status = 'locked_unpaid', delivered_keys = ?
+                    WHERE user_id = 7047310836 AND id IN (3, 4)
+                    """,
+                    (locked_msg,),
+                )
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET balance = 0, points = 0, orders_count = 0, total_spent = 0
+                    WHERE telegram_id = 7047310836
+                      AND NOT EXISTS (
+                          SELECT 1 FROM deposits WHERE user_id = 7047310836 AND status = 'approved'
+                      )
+                    """
+                )
+            self._users_cache.pop(7047310836, None)
+            recovered_links = [
+                "https://activation-market.shop/r/oQotH_9wuK9fnPztl4xEc6MdLnd9iadmy8-GMlK1FF1qZmUzWG425sKj5hw0OptCdkUw9wu3GQwK2eLn0wumzuo",
+                "https://activation-market.shop/r/ZqSDVqUa38Ya8sErW2SddC5jgBWALJB7ipz4q_m_NjBYND7d3KW0PW7PV9QhlowtNbh3MxfdTUBNq6O06Hpvpdw",
+            ]
+            self.add_or_append_local_backup_source(
+                product_id="6a31035939dc014325da2c66",
+                source_name="Kho Thu Hồi Đơn #3 & #4",
+                cost_vnd=33635,
+                new_keys=recovered_links,
+            )
+            self.set_setting("revoked_unpaid_7047310836_v1", "1")
+            logger.info("🔒 Đã khóa đơn #3 & #4 của khách 7047310836 và đưa 2 link vào Kho Thu Hồi!")
+        except Exception as exc:
+            logger.warning("Không thể thực thi khóa đơn 7047310836 tự động: %s", exc)
 
     def warm_all_caches(self) -> None:
         """Nạp toàn bộ bảng cấu hình, giá ghi đè, voucher và nguồn dự phòng vào RAM trong 1 kết nối duy nhất."""
@@ -699,27 +775,61 @@ class Database:
             return dict(result)
 
     # --- Users (Có RAM Cache 180s + Tự động xóa cache khi đổi số dư/ngôn ngữ) ---
-    def get_or_create_user(self, telegram_id: int, username: str = "", referred_by: int | None = None) -> dict[str, Any]:
+    @staticmethod
+    def is_valid_tg_username(uname: str) -> bool:
+        """Kiểm tra chuỗi có phải là @username hợp lệ của Telegram (chỉ gồm chữ cái ASCII, số, dấu gạch dưới, dài 5-32 ký tự)."""
+        s = (uname or "").strip().lstrip("@")
+        return bool(re.match(r"^[A-Za-z0-9_]{5,32}$", s))
+
+    def get_or_create_user(
+        self,
+        telegram_id: int,
+        username: str = "",
+        referred_by: int | None = None,
+        full_name: str = "",
+    ) -> dict[str, Any]:
         import time
+
+        raw_u = (username or "").strip().lstrip("@")
+        raw_f = (full_name or "").strip()
+        if raw_u and not self.is_valid_tg_username(raw_u):
+            if not raw_f:
+                raw_f = raw_u
+            raw_u = ""
 
         now = time.monotonic()
         cached = self._users_cache.get(telegram_id)
         if cached is not None and (now - cached[0] < 180.0):
             u_cached = cached[1]
-            if not username or u_cached.get("username") == username:
+            u_ok = (not raw_u) or (u_cached.get("username") == raw_u)
+            f_ok = (not raw_f) or (u_cached.get("full_name") == raw_f)
+            if u_ok and f_ok:
                 return dict(u_cached)
 
         with self._conn() as conn:
             row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
             if not row:
                 conn.execute(
-                    "INSERT INTO users (telegram_id, username, referred_by, joined_at) VALUES (?, ?, ?, ?)",
-                    (telegram_id, username or "", referred_by, now_str()),
+                    "INSERT INTO users (telegram_id, username, full_name, referred_by, joined_at) VALUES (?, ?, ?, ?, ?)",
+                    (telegram_id, raw_u, raw_f, referred_by, now_str()),
                 )
                 row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-            elif username and row["username"] != username:
-                conn.execute("UPDATE users SET username = ? WHERE telegram_id = ?", (username, telegram_id))
-                row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
+            else:
+                cur_u = str(row["username"] or "")
+                cur_f = str(row.get("full_name") if hasattr(row, "get") else (row["full_name"] if "full_name" in row.keys() else "") or "")
+                # Tự động sửa nếu trước đây lưu nhầm tên hiển thị vào cột username
+                if cur_u and not self.is_valid_tg_username(cur_u):
+                    if not cur_f:
+                        cur_f = cur_u
+                    cur_u = ""
+                new_u = raw_u if raw_u else cur_u
+                new_f = raw_f if raw_f else cur_f
+                if new_u != str(row["username"] or "") or new_f != str(row["full_name"] or ""):
+                    conn.execute(
+                        "UPDATE users SET username = ?, full_name = ? WHERE telegram_id = ?",
+                        (new_u, new_f, telegram_id),
+                    )
+                    row = conn.execute("SELECT * FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
             res = dict(row)
             self._users_cache[telegram_id] = (now, res)
             return dict(res)
@@ -734,10 +844,36 @@ class Database:
                 if row:
                     return dict(row)
             row = conn.execute(
-                "SELECT * FROM users WHERE LOWER(username) = LOWER(?) ORDER BY total_spent DESC LIMIT 1",
-                (q,),
+                """
+                SELECT * FROM users
+                WHERE LOWER(username) = LOWER(?) OR LOWER(full_name) = LOWER(?)
+                ORDER BY total_spent DESC, joined_at DESC LIMIT 1
+                """,
+                (q, q),
+            ).fetchone()
+            if row:
+                return dict(row)
+            like_q = f"%{q}%"
+            row = conn.execute(
+                """
+                SELECT * FROM users
+                WHERE LOWER(full_name) LIKE LOWER(?) OR LOWER(username) LIKE LOWER(?)
+                ORDER BY total_spent DESC, joined_at DESC LIMIT 1
+                """,
+                (like_q, like_q),
             ).fetchone()
             return dict(row) if row else None
+
+    def get_recent_users(self, limit: int = 12, offset: int = 0) -> tuple[list[dict[str, Any]], int]:
+        """Lấy danh sách khách hàng phân trang để Admin xem tên, ID và nhắn tin trực tiếp 1 chạm."""
+        with self._conn() as conn:
+            cnt_row = conn.execute("SELECT COUNT(*) AS c FROM users").fetchone()
+            total = int(cnt_row["c"]) if cnt_row else 0
+            rows = conn.execute(
+                "SELECT * FROM users ORDER BY joined_at DESC LIMIT ? OFFSET ?",
+                (int(limit), int(offset)),
+            ).fetchall()
+            return [dict(r) for r in rows], total
 
     def get_all_user_ids(self) -> list[int]:
         with self._conn() as conn:

@@ -2715,7 +2715,15 @@ async def run_bot() -> None:
                         f"• `#{o['id']}` | **{o['product_name']}** (x{o['quantity']}) — **{vnd_int(o['retail_price']):,}đ** [{o['status']}]\n"
                         f"  🔑 `{clean_keys}`"
                     )
-                    if len(warr_btns) < 6:
+                    if o.get("status") == "locked_unpaid":
+                        warr_btns.append(
+                            Button.inline(
+                                f"🔓 Mở khóa #{o['id']} ({vnd_int(o['retail_price']):,}đ)",
+                                f"unlock_ord:{o['id']}".encode(),
+                                style="success",
+                            )
+                        )
+                    elif len(warr_btns) < 6:
                         warr_btns.append(
                             Button.inline(
                                 t(lang, "warr_btn", order_id=o["id"]),
@@ -2727,6 +2735,84 @@ async def run_bot() -> None:
                 txt = "\n".join(lines)
             rows.append([Button.inline(t(lang, "btn_back"), b"menu:profile")])
             await send_or_edit(event, txt, buttons=rows)
+            return
+
+        if data.startswith("unlock_ord:"):
+            oid = int(data.split(":")[1])
+            o = db.get_order_by_id(oid, uid)
+            if not o:
+                await event.answer("❌ Không tìm thấy đơn hàng này.", alert=True)
+                return
+            if o.get("status") != "locked_unpaid":
+                await event.answer("✅ Đơn hàng này đã được mở khóa! Bạn có thể xem trong mục Đơn hàng đã mua.", alert=True)
+                return
+            req_vnd = max(101000, vnd_int(o.get("retail_price", 101000)), vnd_int(o.get("wholesale_cost", 33635)))
+            cur_bal = vnd_int(u.get("balance", 0))
+            if cur_bal < req_vnd:
+                need_more = req_vnd - cur_bal
+                await event.answer(
+                    f"⚠️ Số dư ví của bạn ({cur_bal:,}đ) chưa đủ {req_vnd:,}đ (còn thiếu {need_more:,}đ)!\n"
+                    f"👉 Vui lòng nạp tiền vào ví trước khi mở khóa link kích hoạt.",
+                    alert=True,
+                )
+                await render_deposit_menu(event)
+                return
+
+            ok_deduct, new_bal_after = db.deduct_balance_atomic(uid, req_vnd)
+            if not ok_deduct:
+                await event.answer("⚠️ Số dư không đủ để mở khóa đơn hàng. Vui lòng nạp tiền trước!", alert=True)
+                await render_deposit_menu(event)
+                return
+
+            await event.answer("🔓 Đang mở khóa link kích hoạt...", alert=False)
+            pid = str(o.get("product_id", "6a31035939dc014325da2c66"))
+            qty_ord = max(1, int(o.get("quantity", 1) or 1))
+            p = await ps_client.get_product_by_id(pid, refresh=False)
+            if not p:
+                p = {"id": pid, "name": o.get("product_name", "Gemini Pro 18Months (link)"), "price": 1.3}
+            try:
+                res = await ps_client.fulfill_multi_source_order(
+                    product=p,
+                    db=db,
+                    quantity=qty_ord,
+                    idempotency_key=f"unlock_{uid}_{oid}_{int(time.time())}",
+                )
+                keys = res.get("deliveredKeys") or ([res["deliveredKey"]] if res.get("deliveredKey") else [])
+                db.mark_order_delivered(oid, keys)
+                db.record_user_purchase(uid, req_vnd, qty_ord)
+                keys_block = "\n".join(keys) if keys else "Đã mở khóa!"
+                await send_or_edit(
+                    event,
+                    (
+                        f"🎉 **MỞ KHÓA ĐƠN HÀNG `#{oid}` THÀNH CÔNG!**\n\n"
+                        f"🛍️ Sản phẩm: **{o['product_name']}** (x{qty_ord})\n"
+                        f"💳 Đã thanh toán: **{req_vnd:,}đ**\n"
+                        f"💰 Số dư còn lại: **{new_bal_after:,}đ**\n\n"
+                        f"🔑 **Link kích hoạt của bạn:**\n`{keys_block}`"
+                    ),
+                    buttons=[[Button.inline(t(lang, "btn_back"), b"menu:home")]],
+                )
+                for adm_id in ADMIN_IDS:
+                    try:
+                        await client.send_message(
+                            adm_id,
+                            (
+                                f"✅ **KHÁCH ĐÃ NẠP TIỀN & MỞ KHÓA ĐƠN THU HỒI #{oid}**\n\n"
+                                f"👤 Khách hàng: `{uid}` (@{u.get('username') or 'user'})\n"
+                                f"🛍️ Sản phẩm: **{o['product_name']}** (x{qty_ord})\n"
+                                f"💵 Đã thu đủ: **{req_vnd:,}đ** (Số dư còn: `{new_bal_after:,}đ`)\n"
+                                f"📦 Nguồn xuất: **{res.get('source_summary', 'Kho Thu Hồi')}**"
+                            ),
+                        )
+                    except Exception:
+                        pass
+            except Exception as exc:
+                db.adjust_balance(uid, req_vnd)
+                await send_or_edit(
+                    event,
+                    f"❌ Lỗi khi lấy link mở khóa đơn #{oid}: `{exc}`. Đã hoàn lại **{req_vnd:,}đ** vào ví của bạn.",
+                    buttons=[[Button.inline(t(lang, "btn_back"), b"menu:home")]],
+                )
             return
 
         if data.startswith("warr:ask:"):

@@ -1145,6 +1145,36 @@ class ProdSellerClient:
         last_backup_err: Exception | None = None
 
         rem_qty = qty
+        popped_rollback_log: list[tuple[int, list[str]]] = []
+
+        # Bước 0: Ưu tiên rút từ Kho Key Nội Bộ (local_stock - hàng đã trả tiền sẵn / thu hồi) trước khi gọi API ngoài
+        local_sources = [
+            s
+            for s in db.get_product_backup_sources(pid)
+            if int(s.get("active", 0) or 0) == 1
+            and str(s.get("source_type", "local_stock") or "local_stock") == "local_stock"
+            and int(s.get("available_stock", 0) or 0) > 0
+        ]
+        for l_src in local_sources:
+            if rem_qty <= 0:
+                break
+            sid = int(l_src["id"])
+            sname = str(l_src["source_name"])
+            b_cost_vnd = int(l_src["cost_vnd"])
+            avail = max(0, int(l_src.get("available_stock", 0) or 0))
+            take_b = min(rem_qty, avail)
+            if take_b <= 0:
+                continue
+            popped = db.pop_backup_keys_atomic(sid, take_b)
+            if popped:
+                used_backup = True
+                popped_rollback_log.append((sid, popped))
+                all_keys.extend(popped)
+                total_actual_cost_vnd += len(popped) * b_cost_vnd
+                source_parts.append(f"{sname} (x{len(popped)})")
+                rem_qty -= len(popped)
+
+        want_primary = 0 if rem_qty <= 0 else (rem_qty if primary_stock is None else min(rem_qty, max(0, primary_stock)))
 
         # Bước 1: Thử lấy từ Nguồn 1 nếu Nguồn 1 báo còn hàng
         if want_primary > 0:
@@ -1212,7 +1242,6 @@ class ProdSellerClient:
                 logging.warning("Nguồn 1 lỗi khi mua %s (x%s), chuyển sang Nguồn Dự Phòng: %s", pid, want_primary, exc)
 
         # Bước 2: Bù số lượng còn thiếu từ các Nguồn Dự Phòng (ưu tiên giá vốn thấp nhất trước)
-        popped_rollback_log: list[tuple[int, list[str]]] = []
         if rem_qty > 0:
             backup_sources = [
                 s
