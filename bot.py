@@ -1925,6 +1925,9 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
             Button.inline("📦 10 Đơn gần nhất", b"adm:orders"),
         ],
         [
+            Button.inline(f"🔑 Kho Key & Link Thu Hồi ({total_backup_keys})", b"adm:local_keys", style="success"),
+        ],
+        [
             Button.inline("📁 Kho Hàng & Nguồn Cung", b"adm:dir:catalog", style="primary"),
             Button.inline("📁 Cài Đặt Giá & Lãi", b"adm:dir:pricing", style="primary"),
         ],
@@ -1967,6 +1970,7 @@ async def render_admin_folder(event: Any, folder: str, force_new: bool = False) 
             f"🔔 Cảnh báo sắp hết vốn: **Khi dưới `${low_bal_usd:.2f}`**"
         )
         rows = [
+            [Button.inline(f"🔑 Xem Kho Key Nội Bộ & Link Thu Hồi ({total_backup_keys} key)", b"adm:local_keys", style="success")],
             [Button.inline("🏷️ Quản lý SP & Nguồn Hàng Dự Phòng", b"adm:plist:0", style="primary")],
             [
                 Button.inline("🔄 Đồng bộ Kho ngay", b"adm:sync", style="success"),
@@ -2411,6 +2415,62 @@ async def render_admin_product_list(event: Any, page: int = 0) -> None:
     )
 
 
+async def render_admin_local_keys_inventory(event: Any) -> None:
+    """Hiển thị toàn bộ Key/Link đang nằm trong Kho Dự Phòng Nội Bộ (local_stock) bao gồm cả Link Thu Hồi."""
+    backup_map = db.get_all_backup_sources()
+    products = await ps_client.sync_products(force=False)
+    prod_names = {str(p["id"]): str(p["name"]) for p in products}
+
+    local_entries: list[tuple[str, str, dict[str, Any]]] = []
+    for pid, src_list in backup_map.items():
+        for s in src_list:
+            if s.get("source_type") == "local_stock":
+                keys_list = s.get("stock_keys_list") or []
+                if keys_list:
+                    p_name = prod_names.get(pid, f"SP {pid}")
+                    local_entries.append((pid, p_name, s))
+
+    rows: list[list[Any]] = []
+    if not local_entries:
+        text = (
+            "🔑 **KHO KEY NỘI BỘ & LINK THU HỒI (`local_stock`)**\n\n"
+            "📭 Hiện tại không có Key/Link nội bộ nào đang tồn trong kho."
+        )
+    else:
+        lines = [
+            "🔑 **DANH SÁCH KEY NỘI BỘ & LINK THU HỒI ĐANG LƯU TRONG KHO**\n"
+            "⚡ *Các Key/Link này được ưu tiên xuất tự động trước tiên khi khách mua hoặc mở khóa đơn (không tốn thêm USDT bên ProdSeller):*\n"
+        ]
+        for pid, p_name, s in local_entries:
+            sid = int(s["id"])
+            is_act = int(s.get("active", 0) or 0) == 1
+            st_icon = "🟢 Đang BẬT" if is_act else "🔴 Đang TẮT"
+            keys_list = s.get("stock_keys_list") or []
+            cost_vnd = int(s.get("cost_vnd", 0) or 0)
+            lines.append(
+                f"🛍️ **{p_name}** (`{pid}`)\n"
+                f"📦 Nguồn `#{sid}`: **{s['source_name']}** [{st_icon}] — Vốn: `{cost_vnd:,}đ` | Tồn: **{len(keys_list)}**"
+            )
+            for idx_k, k_val in enumerate(keys_list[:10], 1):
+                lines.append(f"  {idx_k}. `{k_val}`")
+            lines.append("")
+            rows.append([
+                Button.inline(f"🏷️ Mở SP: {p_name[:18]}", f"adm:editp:{pid}".encode(), style="primary"),
+                Button.inline(
+                    f"{'🔴 Tắt' if is_act else '🟢 Bật'} #{sid}",
+                    f"adm:bsrc_tog:{sid}:{pid}".encode(),
+                ),
+                Button.inline(f"🗑️ Xóa #{sid}", f"adm:bsrc_del:{sid}:{pid}".encode(), style="danger"),
+            ])
+        text = "\n".join(lines)
+
+    rows.append([
+        Button.inline("📁 Kho Hàng & Nguồn Cung", b"adm:dir:catalog"),
+        Button.inline("« Về Bảng Admin", b"adm:home"),
+    ])
+    await send_or_edit(event, text, buttons=rows)
+
+
 async def render_admin_edit_product(event: Any, product_id: str) -> None:
     p = await ps_client.get_product_by_id(product_id, refresh=False)
     if not p:
@@ -2454,6 +2514,9 @@ async def render_admin_edit_product(event: Any, product_id: str) -> None:
                 f"  {s_act} `#{sid}` **{s['source_name']}** ({s_type}) — Vốn: `{s_cost:,}đ` | Kho: **{s_st}** "
                 f"➡️ Giá bán khi bù: **`{s_stab_price:,}đ`** *(Lãi `+{s_prof_pct:.0f}%`)*"
             )
+            if s.get("source_type") == "local_stock":
+                for idx_k, k_val in enumerate(s.get("stock_keys_list") or [], 1):
+                    b_lines.append(f"     🔑 Key/Link {idx_k}: `{k_val}`")
     b_block = "\n".join(b_lines)
     p_st_val = 1 if p_st is None else int(p_st)
     k1_name = "@DanteHubBot (Độc quyền)" if is_dh_primary else "@ProdSellerBot"
@@ -3781,6 +3844,11 @@ async def run_bot() -> None:
                 ps_client._linked_dante_ids.add(full_dh_id)
                 await event.answer(f"✅ Đã gắn nguồn @DanteHubBot ({info.get('name', full_dh_id)[:20]})!", alert=True)
                 await render_admin_edit_product(event, pid)
+                return
+
+            if data == "adm:local_keys":
+                await event.answer()
+                await render_admin_local_keys_inventory(event)
                 return
 
             if data.startswith("adm:plist:"):
