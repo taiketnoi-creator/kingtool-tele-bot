@@ -69,7 +69,7 @@ Khi có biến môi trường `DATABASE_URL`, `Database` tự động dịch m�
      - Cấu hình SePay tự động ban đêm: `sepay_api_token`, `sepay_night_start` (`23`), `sepay_night_end` (`6`), `sepay_monthly_limit` (`50`), `sepay_used_month`, `sepay_used_count`.
      - Cấu hình ưu đãi: `referral_commission_pct` (`5.0%`), `point_value_vnd` (`100đ`).
 2. **`telebot.users`**:
-   - `telegram_id BIGINT PRIMARY KEY`, `username`, `balance NUMERIC(18,2)`, `points INTEGER`, `tier TEXT` (`bronze`/`silver`/`gold`), `orders_count`, `total_spent NUMERIC(18,2)`, `language`, `referred_by BIGINT`, `joined_at`.
+   - `telegram_id BIGINT PRIMARY KEY`, `username` (chỉ lưu `@username` hợp lệ của Telegram), `full_name` (tên hiển thị đầy đủ của khách hàng), `balance NUMERIC(18,2)`, `points INTEGER`, `tier TEXT` (`bronze`/`silver`/`gold`), `orders_count`, `total_spent NUMERIC(18,2)`, `language`, `referred_by BIGINT`, `gift_claimed INTEGER`, `joined_at`.
 3. **`telebot.product_overrides`**:
    - `product_id TEXT PRIMARY KEY`, `custom_price NUMERIC(18,2)` (giá bán lẻ VNĐ cố định riêng nếu không dùng % chung), `hidden INTEGER` (`0` = hiện, `1` = ẩn khỏi menu khách).
 4. **`telebot.deposits`**:

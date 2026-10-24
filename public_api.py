@@ -791,6 +791,18 @@ async def handle_http_request(
                     if bot_client and admin_ids:
                         profit_vnd = total_retail_vnd - actual_cost_vnd
                         profit_pct = (profit_vnd / actual_cost_vnd * 100.0) if actual_cost_vnd > 0 else 0.0
+                        raw_u = str(user.get("username", "") or "").strip().lstrip("@")
+                        real_u = raw_u if Database.is_valid_tg_username(raw_u) else ""
+                        fname = str(user.get("full_name", "") or "").strip() or (raw_u if raw_u and not real_u else f"Khách #{uid}")
+                        safe_fname = fname.replace("[", "(").replace("]", ")").replace("`", "'")
+                        u_tag = f" (@{real_u})" if real_u else " *(Chưa đặt @username)*"
+                        from telethon import Button
+                        adm_btns = [
+                            [
+                                Button.inline("💬 Nhắn tin cho đại lý", f"adm:msg:{uid}".encode(), style="primary"),
+                                Button.inline("👤 Hồ sơ", f"adm:uinfo:{uid}".encode()),
+                            ]
+                        ]
                         for adm_id in admin_ids:
                             try:
                                 asyncio.create_task(
@@ -798,12 +810,13 @@ async def handle_http_request(
                                         adm_id,
                                         (
                                             f"🔌 **ĐƠN HÀNG QUA API #{local_order_id}**\n\n"
-                                            f"👤 Đại lý: `{uid}` (@{user.get('username') or 'user'})\n"
+                                            f"👤 Đại lý: **[{safe_fname}](tg://user?id={uid})**{u_tag} — ID: `{uid}`\n"
                                             f"🛍️ Sản phẩm: **{p['name']}** (x{qty})\n"
                                             f"📦 Nguồn xuất hàng: **{src_summary}**\n"
                                             f"💵 Thu đại lý: **{total_retail_vnd:,}đ** | Giá vốn: **{actual_cost_vnd:,}đ**\n"
                                             f"📈 **Lợi nhuận ròng: +{profit_vnd:,}đ (+{profit_pct:.0f}%)**"
                                         ),
+                                        buttons=adm_btns,
                                     )
                                 )
                             except Exception:
