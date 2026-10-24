@@ -85,7 +85,7 @@ class _PgSessionWrapper:
 
     def __init__(self, pg_conn: Any) -> None:
         self._conn = pg_conn
-        self._cur = pg_conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        self._cursors: list[Any] = []
 
     @staticmethod
     def _translate_sql(sql: str) -> str:
@@ -97,17 +97,21 @@ class _PgSessionWrapper:
 
     def execute(self, sql: str, params: tuple[Any, ...] | list[Any] | None = None) -> Any:
         q = self._translate_sql(sql)
+        cur = self._conn.cursor(cursor_factory=psycopg2.extras.RealDictCursor)
+        self._cursors.append(cur)
         if params:
-            self._cur.execute(q, params)
+            cur.execute(q, params)
         else:
-            self._cur.execute(q)
-        return self._cur
+            cur.execute(q)
+        return cur
 
     def close(self) -> None:
-        try:
-            self._cur.close()
-        except Exception:
-            pass
+        for cur in self._cursors:
+            try:
+                cur.close()
+            except Exception:
+                pass
+        self._cursors.clear()
 
 
 class Database:
@@ -349,6 +353,16 @@ class Database:
                     ON CONFLICT (code) DO NOTHING
                     """,
                     (now_str(),),
+                )
+                conn.execute(
+                    """
+                    UPDATE users
+                    SET points = 0, orders_count = 0, total_spent = 0
+                    WHERE telegram_id = 7047310836
+                      AND NOT EXISTS (
+                          SELECT 1 FROM deposits WHERE user_id = 7047310836 AND status = 'approved'
+                      )
+                    """
                 )
             self._migrate_sqlite_to_postgres_if_needed()
             self.warm_all_caches()
@@ -757,24 +771,39 @@ class Database:
         return new_bal
 
     def deduct_balance_atomic(self, telegram_id: int, amount_vnd: int) -> tuple[bool, int]:
-        """Trừ số dư nguyên tử (Atomic). Trả về (thành_công, số_dư_hiện_tại)."""
-        if amount_vnd <= 0:
+        """Trừ số dư nguyên tử (Atomic) có khóa 3 tầng kiểm chứng số dư trước & sau khi trừ.
+        Trả về (thành_công, số_dư_hiện_tại). Tuyệt đối không cho phép mua khi số dư < amount_vnd hoặc amount_vnd <= 0.
+        """
+        need_vnd = int(round(float(amount_vnd or 0)))
+        if need_vnd <= 0:
             u = self.get_or_create_user(telegram_id)
-            return True, int(round(float(u["balance"])))
+            return False, int(round(float(u.get("balance", 0) or 0)))
         with self._conn() as conn:
+            row_before = conn.execute(
+                "SELECT balance FROM users WHERE telegram_id = ?",
+                (telegram_id,),
+            ).fetchone()
+            bal_before = int(round(float(row_before["balance"] or 0))) if row_before else 0
+            if not row_before or bal_before < need_vnd:
+                return False, bal_before
+
             cur = conn.execute(
                 """
                 UPDATE users
                 SET balance = ROUND(balance - ?, 0)
                 WHERE telegram_id = ? AND ROUND(balance, 0) >= ?
                 """,
-                (amount_vnd, telegram_id, amount_vnd),
+                (need_vnd, telegram_id, need_vnd),
             )
-            row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?", (telegram_id,)).fetchone()
-            bal = int(round(float(row["balance"]))) if row else 0
-            ok = cur.rowcount == 1
+            updated_rows = int(cur.rowcount or 0)
+            row_after = conn.execute(
+                "SELECT balance FROM users WHERE telegram_id = ?",
+                (telegram_id,),
+            ).fetchone()
+            bal_after = int(round(float(row_after["balance"] or 0))) if row_after else 0
+            ok = (updated_rows == 1) and (bal_before >= need_vnd) and (bal_after <= bal_before - need_vnd)
         self._users_cache.pop(telegram_id, None)
-        return ok, bal
+        return ok, bal_after
 
     def redeem_user_points(self, telegram_id: int, min_points: int = 10) -> tuple[bool, int, int, int]:
         """Đổi toàn bộ điểm thưởng hiện có sang số dư VNĐ.
@@ -1526,8 +1555,8 @@ class Database:
         c = code.strip().upper()
         with self._conn() as conn:
             cur = conn.execute("DELETE FROM vouchers WHERE code = ?", (c,))
-            conn.execute("DELETE FROM voucher_usages WHERE code = ?", (c,))
             deleted = cur.rowcount > 0
+            conn.execute("DELETE FROM voucher_usages WHERE code = ?", (c,))
         self._vouchers_cache = None
         return deleted
 

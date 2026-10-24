@@ -518,6 +518,7 @@ async def execute_purchase(
             await event.respond(t(lang, "ask_activation_email", name=p["name"]))
             return
 
+        db._users_cache.pop(uid, None)
         fresh_user = db.get_or_create_user(uid)
         tier = fresh_user.get("tier", "bronze")
         unit_cost_usd = float(p["price"])
@@ -532,8 +533,18 @@ async def execute_purchase(
             primary_stock=primary_stock,
             backup_map=backup_map,
         )
-        total_cost_vnd = pricing["total_cost_vnd"]
-        total_retail_vnd = pricing["total_final_vnd"]
+        total_cost_vnd = int(pricing["total_cost_vnd"])
+        total_retail_vnd = int(pricing["total_final_vnd"])
+        fresh_bal_vnd = int(round(float(fresh_user.get("balance", 0) or 0)))
+
+        if total_retail_vnd <= 0 or fresh_bal_vnd < total_retail_vnd:
+            rows = [
+                [Button.inline(t(lang, "deposit_now_btn"), b"menu:deposit", style="success")],
+                [Button.inline(t(lang, "btn_back"), f"prd:{product_id}".encode())],
+            ]
+            msg_text = t(lang, "insufficient_balance", need=max(1, total_retail_vnd), have=fresh_bal_vnd)
+            await send_or_edit(event, msg_text, buttons=rows)
+            return
 
         # Trừ số dư VNĐ nguyên tử (Atomic check + deduct)
         deducted_ok, current_bal_vnd = db.deduct_balance_atomic(uid, total_retail_vnd)

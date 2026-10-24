@@ -5,6 +5,24 @@
 
 ---
 
+## [v2.9.5] - 2026-10-24: Vá Khẩn Cấp Lỗ Hổng Trừ Số Dư Trên PostgreSQL (`_PgSessionWrapper` Cursor Rowcount Overwrite)
+
+### 🛡️ Khắc phục lỗi bảo mật nghiêm trọng (Critical Security Hotfix)
+- **Nguyên nhân gốc rễ (`database.py` — `_PgSessionWrapper` & `deduct_balance_atomic`):**
+  - Trong `_PgSessionWrapper`, mọi lệnh `conn.execute(...)` trước đây dùng chung duy nhất 1 con trỏ `self._cur` của `psycopg2`.
+  - Trong hàm `deduct_balance_atomic()`, sau khi chạy lệnh `cur = conn.execute("UPDATE users SET balance = ... WHERE telegram_id = ? AND ROUND(balance, 0) >= ?")` (với khách có số dư `0đ`, lệnh `UPDATE` trả về `rowcount = 0`), hệ thống gọi tiếp `row = conn.execute("SELECT balance FROM users WHERE telegram_id = ?")` trên **cùng con trỏ `self._cur`** trước khi kiểm tra `ok = cur.rowcount == 1`.
+  - Trên PostgreSQL (`psycopg2`), câu lệnh `SELECT` ghi đè `self._cur.rowcount` thành `1` (do tìm thấy 1 dòng user), khiến `ok = cur.rowcount == 1` luôn trả về `True` ngay cả khi khách chưa nạp tiền (`0đ`), dẫn đến Bot tự động gọi API ProdSeller mua hàng bằng vốn của Admin!
+- **Giải pháp khắc phục triệt để 4 lớp (`database.py`, `bot.py`, `public_api.py`):**
+  1. **Tách biệt con trỏ độc lập cho mỗi câu lệnh SQL trong `_PgSessionWrapper.execute()`:** Mỗi lần gọi `conn.execute()` đều khởi tạo một `cursor` riêng biệt (giống hệt cơ chế của `sqlite3`), đảm bảo `cur.rowcount` của câu lệnh `UPDATE`/`DELETE` không bao giờ bị câu lệnh `SELECT` phía sau ghi đè.
+  2. **Khóa kiểm chứng 3 tầng trong `deduct_balance_atomic()`:**
+     - Tầng 1: Từ chối ngay lập tức (`return False`) nếu `need_vnd <= 0` hoặc số dư trước khi trừ `bal_before < need_vnd`.
+     - Tầng 2: Đọc `updated_rows = int(cur.rowcount or 0)` ngay lập tức sau câu lệnh `UPDATE ... WHERE ROUND(balance, 0) >= ?`.
+     - Tầng 3: Kiểm tra số dư sau khi trừ `bal_after <= bal_before - need_vnd` và bắt buộc thỏa mãn đồng thời cả 3 điều kiện `(updated_rows == 1) and (bal_before >= need_vnd) and (bal_after <= bal_before - need_vnd)`.
+  3. **Chốt chặn kiểm tra số dư trực tiếp tại `execute_purchase()` (`bot.py`) và `POST /v1/orders` (`public_api.py`):** Xóa cache RAM của user (`db._users_cache.pop(uid, None)`) và kiểm tra `fresh_bal_vnd < total_retail_vnd` ngay trước khi gọi `deduct_balance_atomic`.
+  4. **Thu hồi điểm thưởng không hợp lệ:** Tự động reset `points = 0, orders_count = 0, total_spent = 0` của tài khoản `7047310836` (`@Vũ`) phát sinh từ 2 đơn chưa nạp tiền.
+
+---
+
 ## [v2.9.4] - 2026-10-19: Hệ Thống Tự Động Thiết Kế & Đính Kèm Ảnh Poster HD Cho Bài Đăng Kênh (`@KingToolShopOfficial`)
 
 ### 🎨 1. Bộ Engine Tạo Ảnh Poster Đồ Họa Động Trực Tiếp Trên RAM (`channel_graphics.py`)

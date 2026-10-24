@@ -695,6 +695,22 @@ async def handle_http_request(
                     vip_disc_pct = int(pricing["vip_disc_pct"])
                     discount_amount_vnd = max(0, total_base_vnd - total_retail_vnd)
 
+                    db._users_cache.pop(uid, None)
+                    fresh_api_user = db.get_or_create_user(uid)
+                    fresh_api_bal = int(round(float(fresh_api_user.get("balance", 0) or 0)))
+                    if total_retail_vnd <= 0 or fresh_api_bal < total_retail_vnd:
+                        await _send_json(
+                            writer,
+                            402,
+                            {
+                                "error": f"Insufficient balance (Need {total_retail_vnd} VND, available {fresh_api_bal} VND)",
+                                "required": total_retail_vnd,
+                                "balance": fresh_api_bal,
+                                "currency": "VND",
+                            },
+                        )
+                        return
+
                     # Trừ tiền nguyên tử từ số dư ví VNĐ của đại lý
                     ok_deduct, current_bal = db.deduct_balance_atomic(uid, total_retail_vnd)
                     if not ok_deduct:
