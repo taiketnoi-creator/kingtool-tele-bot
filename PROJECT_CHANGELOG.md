@@ -5,6 +5,37 @@
 
 ---
 
+## [v2.9.6] - 2026-10-24: Bắt Buộc Tham Gia Kênh & Nhóm Trước Khi Mua/Nạp (`Force-Join Gate`) + Hiển Thị Tên Khách Hàng & Nhắn Tin Trực Tiếp 1 Chạm Qua Bot
+
+### 🛡️ 1. Cổng Bắt Buộc Tham Gia Kênh & Nhóm Cộng Đồng Trước Khi Mua Hàng / Nạp Tiền (`bot.py`, `i18n.py`, `database.py`)
+- **Kiểm tra thành viên kép (`check_user_joined_community` & `ensure_user_joined_community`):**
+  - Trước khi khách hàng thực hiện **Mua sản phẩm (`buy:`, `qtyc:`, `vch:ask:`)**, **Nạp tiền (`menu:deposit`, `dep:method:`, `dep:create:`, `dep:custom:`)** hoặc **Nhận Quà Tân Thủ (`gift:claim`)**, Bot tự động kiểm tra khách đã tham gia đủ cả 2 nơi:
+    1. **Kênh Thông Báo & Bảng Giá (`@KingToolShopOfficial` — `support_channel`)**
+    2. **Nhóm Cộng Đồng & Hỗ Trợ CSKH (`@KingToolShopSupport` — `support_admin`)**
+  - Nếu khách chưa tham gia đủ cả 2, Bot hiển thị màn hình **Yêu cầu Tham gia Kênh & Nhóm** kèm trạng thái thời gian thực (`✅ Đã tham gia` / `❌ Chưa tham gia`), 2 nút mở nhanh Kênh/Nhóm và nút **`🔄 Tôi đã tham gia đủ — Tiếp tục ngay` (`fjoin:chk:<resume_cb>`)**.
+  - Ngay khi khách tham gia đủ và bấm xác nhận:
+    - Tự động tặng luôn **Quà Tân Thủ (`+5 điểm thưởng` + tự động áp sẵn mã giảm giá `WELCOME15`)** nếu khách chưa nhận.
+    - Tự động tiếp tục đúng thao tác mua hàng hoặc nạp tiền mà khách đang thực hiện.
+  - Tích hợp bộ đệm RAM `_JOIN_VERIFIED_CACHE` (TTL `300s` khi đã tham gia đủ) giúp khách đã vào Kênh & Nhóm mua hàng siêu tốc, không bị trễ nhịp kiểm tra mạng lặp lại.
+  - Cho phép Admin Bật/Tắt nhanh 1 chạm tại `/admin` -> `📁 Kênh & Auto Đăng Bài` (`🟢/🔴 Bắt buộc Join Kênh+Nhóm: BẬT/TẮT`).
+
+### 👤 2. Lưu & Hiển Thị Đúng Tên Hiển Thị Khách Hàng (`full_name`) + Nhắn Tin Trực Tiếp 2 Chiều Qua Bot (`database.py`, `bot.py`, `public_api.py`)
+- **Khắc phục triệt để lỗi hiển thị `@Tên_Hiển_Thị` không tìm kiếm được trên Telegram:**
+  - Trước đây, khi khách hàng không cài đặt `@username` trên Telegram (chỉ có tên hiển thị như `"Vũ"`), hệ thống lấy `first_name` lưu vào cột `username` và hiển thị là `@Vũ`, khiến Admin gõ tìm `@Vũ` trên thanh tìm kiếm Telegram không ra kết quả.
+  - **Bổ sung cột `full_name` vào bảng `telebot.users` (`database.py`):**
+    - Hàm `Database.is_valid_tg_username()` kiểm tra chuẩn định dạng `@username` Telegram (`^[A-Za-z0-9_]{5,32}$`).
+    - Tự động tách riêng **`full_name` (Tên hiển thị đầy đủ: Họ + Tên)** và **`username` (`@username` thật)**; đồng thời tự động dọn dẹp dữ liệu cũ trong DB (chuyển các tên hiển thị bị lưu nhầm ở cột `username` sang `full_name`).
+  - **Liên kết mở thẳng trang cá nhân Telegram & Phân biệt rõ trạng thái `@username` (`format_admin_user_line`):**
+    - Mọi thông báo gửi về Admin (Đơn hàng mới, Yêu cầu duyệt nạp tiền, Báo lỗi đơn hàng, Yêu cầu bảo hành, Đơn API, Hỗ trợ trên nhóm CSKH) đều hiển thị tên khách dưới dạng liên kết bấm được **`**[Tên Hiển Thị](tg://user?id=<telegram_id>)**`** kèm chú thích rõ `(@username)` hoặc `*(Chưa đặt @username)*` — Admin chỉ cần chạm vào tên là mở thẳng hồ sơ Telegram của khách (đặc biệt khi khách đã tham gia chung nhóm `@KingToolShopSupport`).
+- **Hệ thống Nhắn Tin Trực Tiếp 2 Chiều Giữa Admin & Khách Hàng Ngay Trên Bot (`adm:msg:<uid>` & `usr:reply_adm`):**
+  - Mọi thông báo đơn hàng, nạp tiền, bảo hành và hồ sơ khách hàng đều có sẵn nút **`💬 Nhắn tin cho khách` (`adm:msg:<uid>`)** và **`👤 Hồ sơ` (`adm:uinfo:<uid>`)**.
+  - Khi Admin bấm `💬 Nhắn tin cho khách` và nhập nội dung, Bot gửi tin nhắn trực tiếp tới khách hàng kèm nút **`💬 Phản hồi lại Admin` (`usr:reply_adm`)** giúp Admin và khách trò chuyện 2 chiều ngay qua Bot kể cả khi khách không có `@username` hoặc chặn tìm kiếm số điện thoại.
+- **Nâng cấp Quản Lý & Tra Cứu Khách Hàng trong `/admin` -> `📁 Quản Lý Khách Hàng`:**
+  - Thêm mục **`👥 Danh sách Khách hàng mới nhất` (`adm:userlist:0`)** và trang **`👤 Hồ sơ chi tiết Khách hàng` (`render_admin_user_detail`)** hiển thị trạng thái tham gia Kênh/Nhóm thời gian thực, lịch sử đơn hàng và nút cộng/trừ số dư 1 chạm (`adm:addbal_u:<uid>`).
+  - Nâng cấp `db.find_user(query)` cho phép Admin tìm kiếm khách hàng bằng **Tên hiển thị** (ví dụ gõ `Vũ`), **`Telegram ID`** hoặc **`@username`**.
+
+---
+
 ## [v2.9.5] - 2026-10-24: Vá Khẩn Cấp Lỗ Hổng Trừ Số Dư Trên PostgreSQL (`_PgSessionWrapper` Cursor Rowcount Overwrite)
 
 ### 🛡️ Khắc phục lỗi bảo mật nghiêm trọng (Critical Security Hotfix)

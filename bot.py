@@ -156,15 +156,116 @@ def main_menu_buttons(lang: str, user_id: int) -> list[list[Any]]:
     return rows
 
 
+def extract_sender_identity(sender: Any, uid: int) -> tuple[str, str]:
+    """Trích xuất tách biệt (real_username, full_name) từ đối tượng User của Telethon.
+    Tuyệt đối không gán first_name vào username (tránh lỗi hiển thị @Tên_Khách không tìm thấy trên Telegram).
+    """
+    if sender is None:
+        return "", f"Khách #{uid}"
+    raw_u = (getattr(sender, "username", None) or "").strip().lstrip("@")
+    real_u = raw_u if db.is_valid_tg_username(raw_u) else ""
+    first = (getattr(sender, "first_name", None) or "").strip()
+    last = (getattr(sender, "last_name", None) or "").strip()
+    full_name = f"{first} {last}".strip()
+    if not full_name:
+        full_name = real_u or f"Khách #{uid}"
+    return real_u, full_name
+
+
+def get_user_display_parts(
+    uid: int,
+    user_dict: dict[str, Any] | None = None,
+    fallback_name: str = "",
+) -> tuple[str, str, str]:
+    """Trả về (clean_full_name, clickable_markdown_name, username_display)."""
+    u = user_dict or db._users_cache.get(uid, (0.0, {}))[1] or db.get_or_create_user(uid)
+    raw_u = str(u.get("username") or "").strip().lstrip("@")
+    raw_f = str(u.get("full_name") or fallback_name or "").strip()
+    if raw_u and not db.is_valid_tg_username(raw_u):
+        if not raw_f:
+            raw_f = raw_u
+        raw_u = ""
+    if not raw_f:
+        raw_f = raw_u or f"Khách #{uid}"
+    safe_name = raw_f.replace("[", "(").replace("]", ")").replace("*", "").replace("`", "")
+    clickable_name = f"**[{safe_name}](tg://user?id={uid})**"
+    uname_display = f"@{raw_u}" if raw_u else "*(Chưa đặt @username — Bấm vào tên hoặc nút Nhắn tin)*"
+    return safe_name, clickable_name, uname_display
+
+
+def format_admin_user_line(
+    uid: int,
+    user_dict: dict[str, Any] | None = None,
+    fallback_name: str = "",
+) -> str:
+    """Hiển thị rõ Tên khách hàng (gắn link mở chat trực tiếp), Telegram ID và @username thực tế cho Admin."""
+    _, clickable_name, uname_display = get_user_display_parts(uid, user_dict, fallback_name)
+    return f"👤 Tên khách: {clickable_name} | 🆔 ID: `{uid}`\n🏷️ Username: {uname_display}"
+
+
+async def send_message_to_user_safe(
+    client: TelegramClient,
+    target_uid: int,
+    text_md: str,
+    buttons: list[list[Any]] | None = None,
+    html_fallback: str | None = None,
+    inline_kb_fallback: list[list[dict[str, str]]] | None = None,
+) -> bool:
+    """Gửi tin nhắn tới khách hàng qua Telethon, tự động fallback sang HTTP Bot API nếu phiên mới khởi động chưa có access_hash."""
+    try:
+        await client.send_message(target_uid, text_md, buttons=buttons)
+        return True
+    except Exception:
+        import httpx
+
+        bot_token = os.getenv("RESELLER_BOT_TOKEN", "").strip()
+        if not bot_token:
+            return False
+        payload: dict[str, Any] = {
+            "chat_id": int(target_uid),
+            "text": html_fallback or text_md.replace("**", ""),
+        }
+        if html_fallback:
+            payload["parse_mode"] = "HTML"
+        if inline_kb_fallback:
+            payload["reply_markup"] = {"inline_keyboard": inline_kb_fallback}
+        async with httpx.AsyncClient(timeout=12.0) as hc:
+            r = await hc.post(f"https://api.telegram.org/bot{bot_token}/sendMessage", json=payload)
+            return r.status_code == 200 and bool(r.json().get("ok"))
+
+
+def build_admin_user_buttons(uid: int, include_profile: bool = True) -> list[Any]:
+    """Tạo hàng nút bấm giúp Admin nhắn tin trực tiếp qua Bot, mở khung chat Telegram cá nhân hoặc xem hồ sơ khách hàng."""
+    u = db._users_cache.get(uid, (0.0, {}))[1] or db.get_or_create_user(uid)
+    safe_name, _, _ = get_user_display_parts(uid, u)
+    short_name = safe_name[:14]
+    raw_u = str(u.get("username") or "").strip().lstrip("@")
+    direct_url = f"https://t.me/{raw_u}" if (raw_u and db.is_valid_tg_username(raw_u)) else f"tg://user?id={uid}"
+    row: list[Any] = [
+        Button.inline(f"💬 Nhắn {short_name}", f"adm:msg:{uid}".encode(), style="success"),
+        Button.url("🔗 Mở Chat Riêng", direct_url),
+    ]
+    if include_profile:
+        row.append(Button.inline("👤 Hồ sơ", f"adm:uinfo:{uid}".encode(), style="primary"))
+    return row
+
+
 async def get_user_info(event: Any) -> tuple[dict[str, Any], str]:
     uid = event.sender_id
+    sender_obj = getattr(event, "sender", None)
     cached = db._users_cache.get(uid)
     if cached is not None:
         u_cached = dict(cached[1])
-        return u_cached, u_cached.get("language", "vi")
-    sender = await event.get_sender()
-    uname = getattr(sender, "username", None) or getattr(sender, "first_name", None) or ""
-    u = db.get_or_create_user(uid, uname)
+        if u_cached.get("full_name"):
+            if sender_obj is not None:
+                s_u, s_f = extract_sender_identity(sender_obj, uid)
+                if (s_u and s_u != u_cached.get("username")) or (s_f and s_f != u_cached.get("full_name")):
+                    u = db.get_or_create_user(uid, username=s_u, full_name=s_f)
+                    return u, u.get("language", "vi")
+            return u_cached, u_cached.get("language", "vi")
+    sender = sender_obj or await event.get_sender()
+    real_u, full_name = extract_sender_identity(sender, uid)
+    u = db.get_or_create_user(uid, username=real_u, full_name=full_name)
     return u, u.get("language", "vi")
 
 
@@ -176,6 +277,146 @@ async def send_or_edit(event: Any, text: str, buttons: list[list[Any]] | None = 
         except Exception:
             pass
     return await event.respond(text, buttons=buttons)
+
+
+# ==================== KIỂM TRA BẮT BUỘC THAM GIA KÊNH & NHÓM TRƯỚC KHI MUA HÀNG ====================
+_JOIN_VERIFIED_CACHE: dict[int, float] = {}
+
+
+async def _check_single_chat_joined(client: TelegramClient, chat_username: str, uid: int) -> bool:
+    clean_name = (chat_username or "").lstrip("@").strip()
+    if not clean_name:
+        return True
+    try:
+        perms = await client.get_permissions(clean_name, uid)
+        if perms is None:
+            return False
+        if getattr(perms, "is_banned", False) or getattr(perms, "has_left", False):
+            return False
+        return True
+    except Exception as exc:
+        err_name = type(exc).__name__
+        err_str = str(exc)
+        if "UserNotParticipant" in err_name or "USER_NOT_PARTICIPANT" in err_str:
+            return False
+        logger.warning("Không thể kiểm tra thành viên %s trong @%s: %s (%s)", uid, clean_name, err_name, err_str)
+        return True
+
+
+async def check_user_joined_community(
+    client: TelegramClient,
+    uid: int,
+    force_refresh: bool = False,
+) -> tuple[bool, bool, bool]:
+    """Kiểm tra khách hàng đã tham gia đủ cả Kênh (@KingToolShopOfficial) và Nhóm (@KingToolShopSupport) chưa.
+    Trả về (all_joined, joined_channel, joined_group).
+    """
+    if is_admin(uid):
+        return True, True, True
+    if str(db.get_setting("force_join_enabled", "1") or "0").strip() != "1":
+        return True, True, True
+
+    now_mono = time.monotonic()
+    if not force_refresh:
+        verified_ts = _JOIN_VERIFIED_CACHE.get(uid, 0.0)
+        if verified_ts > 0 and (now_mono - verified_ts < 300.0):
+            return True, True, True
+
+    ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+    grp_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
+
+    joined_ch, joined_grp = await asyncio.gather(
+        _check_single_chat_joined(client, ch_name, uid),
+        _check_single_chat_joined(client, grp_name, uid),
+    )
+    all_ok = bool(joined_ch and joined_grp)
+    if all_ok:
+        _JOIN_VERIFIED_CACHE[uid] = now_mono
+    else:
+        _JOIN_VERIFIED_CACHE.pop(uid, None)
+    return all_ok, bool(joined_ch), bool(joined_grp)
+
+
+async def render_force_join_gate(
+    event: Any,
+    joined_ch: bool,
+    joined_grp: bool,
+    resume_cb: str = "menu:products",
+    back_cb: str = "menu:home",
+    force_new: bool = False,
+) -> None:
+    u, lang = await get_user_info(event)
+    uid = u["telegram_id"]
+    safe_name, _, _ = get_user_display_parts(uid, u)
+    ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+    grp_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
+
+    if lang == "vi":
+        ch_status = "✅ **Đã tham gia**" if joined_ch else "❌ **Chưa tham gia (Bắt buộc)**"
+        grp_status = "✅ **Đã tham gia**" if joined_grp else "❌ **Chưa tham gia (Bắt buộc)**"
+    else:
+        ch_status = "✅ **Joined**" if joined_ch else "❌ **Not joined (Required)**"
+        grp_status = "✅ **Joined**" if joined_grp else "❌ **Not joined (Required)**"
+
+    ch_badge = "✅" if joined_ch else "📣"
+    grp_badge = "✅" if joined_grp else "💬"
+
+    rows: list[list[Any]] = []
+    if ch_name:
+        rows.append([
+            Button.url(
+                t(lang, "force_join_ch_btn", badge=ch_badge, channel=ch_name),
+                f"https://t.me/{ch_name}",
+            )
+        ])
+    if grp_name:
+        rows.append([
+            Button.url(
+                t(lang, "force_join_grp_btn", badge=grp_badge, group=grp_name),
+                f"https://t.me/{grp_name}",
+            )
+        ])
+    rows.append([
+        Button.inline(
+            t(lang, "force_join_verify_btn"),
+            f"fjoin:chk:{resume_cb}".encode(),
+            style="success",
+        )
+    ])
+    rows.append([Button.inline(t(lang, "btn_back"), back_cb.encode())])
+
+    msg_text = t(
+        lang,
+        "force_join_title",
+        full_name=safe_name,
+        uid=uid,
+        channel=ch_name,
+        group=grp_name,
+        ch_status=ch_status,
+        grp_status=grp_status,
+    )
+    await send_or_edit(event, msg_text, buttons=rows, force_new=force_new)
+
+
+async def ensure_user_joined_community(
+    client: TelegramClient,
+    event: Any,
+    resume_cb: str = "menu:products",
+    back_cb: str = "menu:home",
+) -> bool:
+    """Chốt chặn bắt buộc khách hàng phải tham gia Kênh & Nhóm trước khi mua hàng hoặc nạp tiền."""
+    uid = event.sender_id
+    all_ok, joined_ch, joined_grp = await check_user_joined_community(client, uid, force_refresh=False)
+    if all_ok:
+        return True
+    await render_force_join_gate(
+        event,
+        joined_ch=joined_ch,
+        joined_grp=joined_grp,
+        resume_cb=resume_cb,
+        back_cb=back_cb,
+    )
+    return False
 
 
 # ==================== PRODUCTS & SUB-PLANS (BẢNG LƯỚI 2-3 CỘT: ICON + TÊN SP, GIÁ HIỂN THỊ KHI BẤM VÀO CHI TIẾT) ====================
@@ -489,6 +730,15 @@ async def execute_purchase(
     u, lang = await get_user_info(event)
     uid = u["telegram_id"]
 
+    # Bắt buộc khách hàng phải tham gia đủ Kênh (@KingToolShopOfficial) & Nhóm (@KingToolShopSupport) trước khi mua hàng
+    if not await ensure_user_joined_community(
+        client,
+        event,
+        resume_cb=f"buy:{product_id}:{qty}",
+        back_cb=f"prd:{product_id}",
+    ):
+        return
+
     lock = USER_PURCHASE_LOCKS.setdefault(uid, asyncio.Lock())
     if lock.locked():
         if hasattr(event, "answer"):
@@ -575,18 +825,21 @@ async def execute_purchase(
             await status_msg.edit(
                 t(lang, "order_failed_refunded", refund=total_retail_vnd, err=str(exc))
             )
+            user_line_adm = format_admin_user_line(uid, u)
+            adm_btns = [build_admin_user_buttons(uid)]
             for adm_id in ADMIN_IDS:
                 try:
                     await client.send_message(
                         adm_id,
                         (
                             f"⚠️ **CẢNH BÁO LỖI ĐƠN HÀNG**\n\n"
-                            f"👤 Khách: `{uid}` (@{u['username']})\n"
+                            f"{user_line_adm}\n"
                             f"🛍️ SP: **{p['name']}** (x{qty})\n"
                             f"💵 Giá vốn dự kiến: **{total_cost_vnd:,}đ**\n"
                             f"❌ Lỗi từ nguồn hàng: `{exc}`\n"
                             f"*(Hãy kiểm tra số dư USDT @ProdSellerBot hoặc nạp thêm Key vào Kho Dự Phòng!)*"
                         ),
+                        buttons=adm_btns,
                     )
                 except Exception:
                     pass
@@ -676,13 +929,15 @@ async def execute_purchase(
 
         profit_vnd = total_retail_vnd - actual_cost_vnd
         profit_pct = (profit_vnd / actual_cost_vnd * 100.0) if actual_cost_vnd > 0 else 0.0
+        user_line_adm = format_admin_user_line(uid, u)
+        adm_btns = [build_admin_user_buttons(uid)]
         for adm_id in ADMIN_IDS:
             try:
                 await client.send_message(
                     adm_id,
                     (
                         f"🎉 **ĐƠN HÀNG MỚI #{local_order_id}**\n\n"
-                        f"👤 Khách: `{uid}` (@{u['username']})\n"
+                        f"{user_line_adm}\n"
                         f"🛍️ Sản phẩm: **{p['name']}** (x{qty})\n"
                         f"📦 Nguồn xuất hàng: **{source_summary}**\n"
                         f"{vch_admin_line}"
@@ -690,6 +945,7 @@ async def execute_purchase(
                         f"📉 Giá vốn thực tế: **{actual_cost_vnd:,}đ**\n"
                         f"💵 **Lợi nhuận ròng: +{profit_vnd:,}đ (+{profit_pct:.0f}%)**"
                     ),
+                    buttons=adm_btns,
                 )
             except Exception:
                 pass
@@ -1164,27 +1420,29 @@ async def check_and_remind_abandoned_deposits(client: TelegramClient) -> None:
 
 
 async def render_newbie_gift_funnel(event: Any, force_new: bool = False) -> None:
-    """Hiển thị màn hình Phễu Quà Tân Thủ yêu cầu tham gia Kênh @KingToolShopOfficial."""
+    """Hiển thị màn hình Phễu Quà Tân Thủ yêu cầu tham gia Kênh @KingToolShopOfficial & Nhóm @KingToolShopSupport."""
     u, lang = await get_user_info(event)
     channel_user = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
+    group_user = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
     gift_pts = max(1, int(float(db.get_setting("newbie_gift_points", "5") or 5)))
     gift_code = db.get_setting("newbie_gift_voucher", "TANTHU10").strip().upper() or "TANTHU10"
 
     rows = [
         [Button.url(t(lang, "newbie_gift_join_btn", channel=channel_user), f"https://t.me/{channel_user}")],
+        [Button.url(t(lang, "newbie_gift_group_btn", group=group_user), f"https://t.me/{group_user}")],
         [Button.inline(t(lang, "newbie_gift_claim_btn"), b"gift:claim", style="success")],
         [Button.inline(t(lang, "btn_back"), b"menu:home")],
     ]
     await send_or_edit(
         event,
-        t(lang, "newbie_gift_title", channel=channel_user, pts=gift_pts, code=gift_code),
+        t(lang, "newbie_gift_title", channel=channel_user, group=group_user, pts=gift_pts, code=gift_code),
         buttons=rows,
         force_new=force_new,
     )
 
 
 async def handle_claim_newbie_gift(client: TelegramClient, event: Any) -> None:
-    """Kiểm tra khách đã tham gia Kênh @KingToolShopOfficial chưa và trao Quà Tân Thủ (Điểm + Auto-Voucher)."""
+    """Kiểm tra khách đã tham gia Kênh @KingToolShopOfficial & Nhóm @KingToolShopSupport chưa và trao Quà Tân Thủ."""
     u, lang = await get_user_info(event)
     uid = u["telegram_id"]
     if int(u.get("gift_claimed", 0) or 0) == 1:
@@ -1192,23 +1450,16 @@ async def handle_claim_newbie_gift(client: TelegramClient, event: Any) -> None:
         return
 
     channel_user = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
-    joined_ok = False
-    if channel_user:
-        try:
-            perms = await client.get_permissions(channel_user, uid)
-            if perms and not getattr(perms, "is_banned", False):
-                joined_ok = True
-        except Exception as exc:
-            err_name = type(exc).__name__
-            if "UserNotParticipant" in err_name or "USER_NOT_PARTICIPANT" in str(exc):
-                joined_ok = False
-            else:
-                joined_ok = True
-    else:
-        joined_ok = True
+    group_user = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@").strip()
+    all_ok, joined_ch, joined_grp = await check_user_joined_community(client, uid, force_refresh=True)
 
-    if not joined_ok:
-        await event.answer(t(lang, "newbie_gift_not_joined", channel=channel_user), alert=True)
+    if not all_ok:
+        if not joined_ch and not joined_grp:
+            await event.answer(t(lang, "newbie_gift_not_joined", channel=channel_user, group=group_user), alert=True)
+        elif not joined_ch:
+            await event.answer(t(lang, "force_join_missing_channel", channel=channel_user), alert=True)
+        else:
+            await event.answer(t(lang, "force_join_missing_group", group=group_user), alert=True)
         return
 
     gift_pts = max(1, int(float(db.get_setting("newbie_gift_points", "5") or 5)))
@@ -1442,17 +1693,20 @@ async def try_night_sepay_auto_approve(client: TelegramClient, dep: dict[str, An
         else ""
     )
     bonus_adm = f" (+KM `{bonus_vnd:,}đ`)" if bonus_vnd > 0 else ""
+    user_line_adm = format_admin_user_line(int(dep["user_id"]), target_user, str(dep.get("username") or ""))
+    adm_btns = [build_admin_user_buttons(int(dep["user_id"]))]
     for adm_id in ADMIN_IDS:
         try:
             await client.send_message(
                 adm_id,
                 (
                     f"🌙 **[SEPAY TỰ ĐỘNG DUYỆT BAN ĐÊM #{dep_id}]**\n\n"
-                    f"👤 Khách: `{dep['user_id']}` (@{dep['username']})\n"
+                    f"{user_line_adm}\n"
                     f"💵 Đã cộng tự động: **+{total_added:,}đ**{bonus_adm} (Số dư mới: **{new_bal:,}đ**)\n"
                     f"📊 Lượt SePay Free đã dùng tháng này: **{new_used}/{limit} giao dịch**"
                     f"{quota_warn}"
                 ),
+                buttons=adm_btns,
             )
         except Exception:
             pass
@@ -1761,20 +2015,33 @@ async def render_admin_folder(event: Any, folder: str, force_new: bool = False) 
         gift_vch = settings.get("newbie_gift_voucher", "TANTHU10")
         gift_pts = settings.get("newbie_gift_points", "5")
         gift_status = f"🟢 Đang BẬT (`+{gift_pts} điểm & {gift_vch}`)" if gift_on else "🔴 Đang TẮT"
+
+        fjoin_on = str(settings.get("force_join_enabled", "1") or "0").strip() == "1"
+        fjoin_status = "🟢 Đang BẬT (Bắt buộc trước khi mua)" if fjoin_on else "🔴 Đang TẮT"
+
         ch_name = settings.get("support_channel", "KingToolShopOfficial").lstrip("@")
+        grp_name = settings.get("support_admin", "KingToolShopSupport").lstrip("@")
 
         text = (
-            "📁 **THƯ MỤC: KÊNH & TỰ ĐỘNG ĐĂNG BÀI**\n\n"
-            f"• 📣 Kênh liên kết: **@{ch_name}**\n"
+            "📁 **THƯ MỤC: KÊNH, NHÓM & TỰ ĐỘNG ĐĂNG BÀI**\n\n"
+            f"• 📣 Kênh liên kết: **@{ch_name}** | 💬 Nhóm CSKH: **@{grp_name}**\n"
+            f"• 🔒 Bắt buộc Join Kênh & Nhóm trước khi mua: **{fjoin_status}**\n"
             f"• ⏰ Tự động đăng bài Kênh theo giờ: **{autopost_status}**\n"
             f"• 📣 Tự động báo Hàng Về (Restock): **{restock_status}**\n"
             f"• 🤖 Tạo hiệu ứng Đơn Mồi (Social Proof): **{social_status}**\n"
-            f"• 🎁 Phễu Quà Tân Thủ Join Kênh: **{gift_status}**"
+            f"• 🎁 Phễu Quà Tân Thủ Join Kênh & Nhóm: **{gift_status}**"
         )
         rows = [
             [
                 Button.inline("📢 Đăng Bảng Giá Kênh", b"adm:post_catalog", style="success"),
                 Button.inline("🔥 Đăng Bài SP Hot Ngay", b"adm:post_spotlight", style="primary"),
+            ],
+            [
+                Button.inline(
+                    f"🔒 {'Tắt' if fjoin_on else 'Bật'} Bắt Buộc Join Kênh & Nhóm",
+                    b"adm:tog_forcejoin",
+                    style="primary" if fjoin_on else None,
+                ),
             ],
             [
                 Button.inline(f"⏰ {'Tắt' if autopost_on else 'Bật'} Auto Đăng Kênh", b"adm:tog_autopost"),
@@ -1860,15 +2127,19 @@ async def render_admin_folder(event: Any, folder: str, force_new: bool = False) 
             "📁 **THƯ MỤC: QUẢN LÝ KHÁCH HÀNG & THÔNG BÁO**\n\n"
             f"• 👥 Tổng khách hàng: **{stats['users_count']} khách**\n"
             f"• 📦 Tổng đơn hàng: **{stats['orders_count']} đơn**\n"
-            f"• 🆘 Tài khoản CSKH: **@{adm_user}**"
+            f"• 🆘 Nhóm CSKH: **@{adm_user}**\n"
+            "💡 *Mẹo: Bấm **👥 Danh sách Khách hàng** bên dưới để xem tên hiển thị đầy đủ và nhắn tin trực tiếp 1 chạm tới bất kỳ khách nào (kể cả khách không đặt `@username`)!*"
         )
         rows = [
             [
-                Button.inline("🔍 Tra cứu Khách hàng", b"adm:finduser", style="primary"),
-                Button.inline("💵 Cộng/Trừ tiền khách (VNĐ)", b"adm:addbal", style="success"),
+                Button.inline("👥 Danh sách Khách hàng (Nhắn tin 1 chạm)", b"adm:userlist:0", style="success"),
             ],
             [
-                Button.inline("📣 Gửi thông báo (Broadcast)", b"adm:broadcast", style="primary"),
+                Button.inline("🔍 Tra cứu theo Tên / ID", b"adm:finduser", style="primary"),
+                Button.inline("💵 Cộng/Trừ tiền khách (VNĐ)", b"adm:addbal", style="primary"),
+            ],
+            [
+                Button.inline("📣 Gửi thông báo (Broadcast)", b"adm:broadcast"),
                 Button.inline("📦 10 Đơn gần nhất", b"adm:orders"),
             ],
             [Button.inline("📖 Sửa bài Hướng dẫn (Methods)", b"adm:set:methods_text")],
@@ -1934,13 +2205,16 @@ async def render_admin_pending_deposits(event: Any) -> None:
         lines = ["⏳ **DANH SÁCH ĐƠN NẠP ĐANG CHỜ DUYỆT:**\n"]
         for d in deps:
             amt = vnd_int(d["amount_vnd"])
+            d_uid = int(d["user_id"])
+            safe_name, clickable_name, uname_disp = get_user_display_parts(d_uid, fallback_name=str(d.get("username") or ""))
             lines.append(
-                f"• `#{d['id']}` | Khách: `{d['user_id']}` (@{d['username']}) — **{amt:,}đ**\n"
+                f"• `#{d['id']}` | Khách: {clickable_name} (`{d_uid}` | {uname_disp}) — **{amt:,}đ**\n"
                 f"  📝 `{d['memo']}` ({d['created_at']})"
             )
             rows.append([
                 Button.inline(f"✅ Duyệt #{d['id']} (+{amt:,}đ)", f"adm:dep_ok:{d['id']}".encode(), style="success"),
                 Button.inline(f"❌ Từ chối #{d['id']}", f"adm:dep_no:{d['id']}".encode(), style="danger"),
+                Button.inline(f"💬 Nhắn {safe_name[:10]}", f"adm:msg:{d_uid}".encode(), style="primary"),
             ])
         text = "\n".join(lines)
     rows.append([
@@ -1952,17 +2226,141 @@ async def render_admin_pending_deposits(event: Any) -> None:
 
 async def render_admin_recent_orders(event: Any) -> None:
     orders = db.get_recent_orders(limit=10)
+    rows: list[list[Any]] = []
     if not orders:
         text = "📦 **Chưa có đơn hàng nào được ghi nhận.**"
     else:
         lines = ["📦 **10 ĐƠN HÀNG GẦN NHẤT TOÀN HỆ THỐNG:**\n"]
+        seen_uids: list[tuple[int, str]] = []
         for o in orders:
+            o_uid = int(o["user_id"])
+            safe_name, clickable_name, uname_disp = get_user_display_parts(o_uid, fallback_name=str(o.get("username") or ""))
+            if not any(x[0] == o_uid for x in seen_uids):
+                seen_uids.append((o_uid, safe_name))
             lines.append(
-                f"• `#{o['id']}` | `{o['user_id']}` (@{o['username']}) — **{o['product_name'][:22]}** (x{o['quantity']})\n"
+                f"• `#{o['id']}` | {clickable_name} (`{o_uid}` | {uname_disp}) — **{o['product_name'][:22]}** (x{o['quantity']})\n"
                 f"  💰 Bán: **{vnd_int(o['retail_price']):,}đ** | Vốn: {vnd_int(o['wholesale_cost']):,}đ | Lãi: **+{vnd_int(o['profit']):,}đ** [{o['status']}]"
             )
+        for o_uid, s_name in seen_uids[:6]:
+            rows.append([
+                Button.inline(f"💬 Nhắn tin cho {s_name[:16]} ({o_uid})", f"adm:msg:{o_uid}".encode(), style="primary"),
+                Button.inline("👤 Hồ sơ", f"adm:uinfo:{o_uid}".encode()),
+            ])
         text = "\n".join(lines)
-    await send_or_edit(event, text, buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]])
+    rows.append([
+        Button.inline("📁 Quản Lý Khách Hàng", b"adm:dir:users"),
+        Button.inline("« Về Bảng Admin", b"adm:home"),
+    ])
+    await send_or_edit(event, text, buttons=rows)
+
+
+async def render_admin_user_list(event: Any, page: int = 0) -> None:
+    per_page = 10
+    offset = max(0, page) * per_page
+    users_list, total = db.get_recent_users(limit=per_page, offset=offset)
+    max_page = max(0, (total - 1) // per_page)
+    rows: list[list[Any]] = []
+    if not users_list:
+        text = "👥 **Chưa có khách hàng nào trong hệ thống.**"
+    else:
+        lines = [
+            f"👥 **DANH SÁCH KHÁCH HÀNG ({total} KHÁCH — Trang {page + 1}/{max_page + 1})**\n"
+            "💡 *Bấm vào tên khách để mở hồ sơ chi tiết, hoặc bấm nút **💬 Nhắn tin** để nhắn trực tiếp qua Bot:*"
+        ]
+        for u_item in users_list:
+            t_uid = int(u_item["telegram_id"])
+            safe_name, clickable_name, uname_disp = get_user_display_parts(t_uid, u_item)
+            bal_vnd = vnd_int(u_item.get("balance", 0))
+            ord_cnt = int(u_item.get("orders_count", 0) or 0)
+            lines.append(
+                f"• {clickable_name} | ID: `{t_uid}` | {uname_disp}\n"
+                f"  💵 Ví: **{bal_vnd:,}đ** | 📦 Đã mua: **{ord_cnt} đơn** | 📅 `{str(u_item.get('joined_at', ''))[:10]}`"
+            )
+            rows.append([
+                Button.inline(
+                    f"👤 {safe_name[:16]} ({bal_vnd // 1000}k | {ord_cnt} đơn)",
+                    f"adm:uinfo:{t_uid}".encode(),
+                ),
+                Button.inline(
+                    "💬 Nhắn tin",
+                    f"adm:msg:{t_uid}".encode(),
+                    style="primary",
+                ),
+            ])
+        text = "\n".join(lines)
+
+    nav: list[Any] = []
+    if page > 0:
+        nav.append(Button.inline("⬅️ Trang trước", f"adm:userlist:{page - 1}".encode()))
+    if offset + per_page < total:
+        nav.append(Button.inline("Trang sau ➡️", f"adm:userlist:{page + 1}".encode()))
+    if nav:
+        rows.append(nav)
+    rows.append([
+        Button.inline("🔍 Tìm theo Tên / ID", b"adm:finduser", style="success"),
+        Button.inline("« Về Thư mục Khách Hàng", b"adm:dir:users"),
+    ])
+    await send_or_edit(event, text, buttons=rows)
+
+
+async def render_admin_user_detail(
+    client: TelegramClient,
+    event: Any,
+    target_uid: int,
+    force_new: bool = False,
+) -> None:
+    found = db.find_user(str(target_uid))
+    if not found:
+        await send_or_edit(
+            event,
+            f"❌ Không tìm thấy khách hàng có ID `{target_uid}`.",
+            buttons=[[Button.inline("« Về Thư mục Khách Hàng", b"adm:dir:users")]],
+            force_new=force_new,
+        )
+        return
+
+    f_uid = int(found["telegram_id"])
+    safe_name, clickable_name, uname_disp = get_user_display_parts(f_uid, found)
+    all_ok, joined_ch, joined_grp = await check_user_joined_community(client, f_uid, force_refresh=True)
+    ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@")
+    grp_name = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@")
+    ch_badge = "✅ Đã vào" if joined_ch else "❌ Chưa vào"
+    grp_badge = "✅ Đã vào" if joined_grp else "❌ Chưa vào"
+
+    f_orders = db.get_user_orders(f_uid, limit=5)
+    ord_summary = "\n".join(
+        f"  • `#{o['id']}` **{o['product_name'][:22]}** (x{o['quantity']}) — **{vnd_int(o['retail_price']):,}đ** [{o['status']}]"
+        for o in f_orders
+    ) or "  *(Chưa có đơn hàng)*"
+
+    raw_u = str(found.get("username") or "").strip().lstrip("@")
+    has_valid_u = bool(raw_u and db.is_valid_tg_username(raw_u))
+    direct_url = f"https://t.me/{raw_u}" if has_valid_u else f"tg://user?id={f_uid}"
+
+    info_txt = (
+        f"👤 **HỒ SƠ CHI TIẾT KHÁCH HÀNG**\n\n"
+        f"📛 Tên hiển thị: {clickable_name}\n"
+        f"🔗 Liên kết chat riêng: **[👉 Bấm vào đây để mở khung chat cá nhân]({direct_url})**\n"
+        f"🆔 Telegram ID: `{f_uid}`\n"
+        f"🏷️ Username: {uname_disp}\n"
+        f"📣 Kênh `@{ch_name}`: **{ch_badge}** | 💬 Nhóm `@{grp_name}`: **{grp_badge}**\n"
+        f"💎 Hạng: **{str(found.get('tier', 'bronze')).upper()}**\n"
+        f"💵 Số dư hiện tại: **{vnd_int(found.get('balance', 0)):,}đ**\n"
+        f"⭐ Điểm thưởng: **{found.get('points', 0)}**\n"
+        f"📦 Tổng đơn đã mua: **{found.get('orders_count', 0)}** (Chi tiêu: **{vnd_int(found.get('total_spent', 0)):,}đ**)\n"
+        f"📅 Ngày tham gia: `{found.get('joined_at', '')}`\n\n"
+        f"🛍️ **Đơn hàng gần nhất:**\n{ord_summary}"
+    )
+    rows: list[list[Any]] = [
+        [Button.inline(f"💬 Nhắn tin qua Bot cho {safe_name[:18]}", f"adm:msg:{f_uid}".encode(), style="success")],
+        [Button.url(f"🔗 Mở Khung Chat Cá Nhân Telegram ({safe_name[:14]})", direct_url)],
+        [Button.inline("💵 Cộng / Trừ số dư khách này", f"adm:addbal_u:{f_uid}".encode(), style="primary")],
+        [
+            Button.inline("👥 Danh sách Khách hàng", b"adm:userlist:0"),
+            Button.inline("« Thư mục Khách Hàng", b"adm:dir:users"),
+        ],
+    ]
+    await send_or_edit(event, info_txt, buttons=rows, force_new=force_new)
 
 
 async def render_admin_product_list(event: Any, page: int = 0) -> None:
@@ -2317,8 +2715,8 @@ async def run_bot() -> None:
         elif arg.startswith("BUY_"):
             buy_pid = arg[4:].strip()
         sender = await event.get_sender()
-        uname = getattr(sender, "username", None) or getattr(sender, "first_name", None) or ""
-        u = db.get_or_create_user(uid, uname, referred_by=ref_id)
+        real_u, full_name = extract_sender_identity(sender, uid)
+        u = db.get_or_create_user(uid, username=real_u, referred_by=ref_id, full_name=full_name)
         lang = u.get("language", "vi")
         admin_user = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@")
         channel_user = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@")
@@ -2331,7 +2729,17 @@ async def run_bot() -> None:
             await render_newbie_gift_funnel(event, force_new=True)
             return
 
-        await event.respond(t(lang, "welcome_banner", admin=admin_user, channel=channel_user))
+        all_joined, joined_ch, joined_grp = await check_user_joined_community(client, uid, force_refresh=False)
+        welcome_btns = None
+        if not all_joined:
+            welcome_btns = [
+                [Button.url(t(lang, "force_join_ch_btn", channel=channel_user, badge="✅" if joined_ch else "👉"), f"https://t.me/{channel_user}")],
+                [Button.url(t(lang, "force_join_grp_btn", group=admin_user, badge="✅" if joined_grp else "👉"), f"https://t.me/{admin_user}")],
+            ]
+        await event.respond(
+            t(lang, "welcome_banner", admin=admin_user, channel=channel_user),
+            buttons=welcome_btns,
+        )
         await event.respond(
             t(lang, "main_menu_title", balance=vnd_int(u["balance"]), points=u["points"]),
             buttons=main_menu_buttons(lang, uid),
@@ -2394,6 +2802,60 @@ async def run_bot() -> None:
             await event.answer()
             return
 
+        if data.startswith("fjoin:chk:"):
+            resume_cb = data.split(":", 2)[2] or "menu:products"
+            all_ok, joined_ch, joined_grp = await check_user_joined_community(client, uid, force_refresh=True)
+            channel_user = db.get_setting("support_channel", "KingToolShopOfficial").strip().lstrip("@")
+            group_user = db.get_setting("support_admin", "KingToolShopSupport").strip().lstrip("@")
+            if not all_ok:
+                if not joined_ch and not joined_grp:
+                    msg = t(lang, "force_join_missing_both", channel=channel_user, group=group_user)
+                elif not joined_ch:
+                    msg = t(lang, "force_join_missing_channel", channel=channel_user)
+                else:
+                    msg = t(lang, "force_join_missing_group", group=group_user)
+                await event.answer(msg, alert=True)
+                await render_force_join_gate(
+                    event,
+                    joined_ch=joined_ch,
+                    joined_grp=joined_grp,
+                    resume_cb=resume_cb,
+                )
+                return
+
+            # Tự động tặng luôn Quà Tân Thủ (+5 điểm + tự áp mã WELCOME15) nếu khách chưa nhận
+            if str(db.get_setting("newbie_gift_enabled", "1") or "0").strip() == "1" and int(u.get("gift_claimed", 0) or 0) == 0:
+                gift_pts = max(1, int(float(db.get_setting("newbie_gift_points", "5") or 5)))
+                gift_code = (db.get_setting("newbie_gift_voucher", "WELCOME15") or "WELCOME15").strip().upper()
+                claimed_ok, _ = db.claim_newbie_gift(uid, bonus_points=gift_pts)
+                if claimed_ok:
+                    USER_ACTIVE_VOUCHER[uid] = gift_code
+
+            await event.answer(t(lang, "force_join_ok_toast"), alert=False)
+            if resume_cb.startswith("buy:"):
+                parts = resume_cb.split(":")
+                if len(parts) >= 3:
+                    await execute_purchase(client, event, parts[1], int(parts[2]))
+                    return
+            if resume_cb.startswith("prd:"):
+                await render_product_detail(event, resume_cb.split(":", 1)[1], qty=1)
+                return
+            if resume_cb == "menu:deposit":
+                await render_deposit_menu(event)
+                return
+            await render_products_menu(event)
+            return
+
+        if data == "usr:reply_adm":
+            await event.answer()
+            USER_AWAITING[uid] = {"type": "user_reply_admin"}
+            await event.respond(
+                "💬 **NHẮN TIN TRỰC TIẾP TỚI ADMIN SHOP**\n\n"
+                "Hãy nhập nội dung tin nhắn hoặc câu hỏi của bạn vào đây, hệ thống sẽ chuyển thẳng tới Admin ngay lập tức (hoặc gõ `/cancel` để hủy):",
+                buttons=[[Button.inline(t(lang, "btn_back"), b"menu:home")]],
+            )
+            return
+
         if data == "menu:gift":
             await event.answer()
             await render_newbie_gift_funnel(event)
@@ -2443,6 +2905,8 @@ async def run_bot() -> None:
         if data.startswith("qtyc:"):
             await event.answer()
             pid = data.split(":", 1)[1]
+            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb=f"prd:{pid}"):
+                return
             p = await ps_client.get_product_by_id(pid, refresh=False)
             if not p:
                 return
@@ -2465,6 +2929,8 @@ async def run_bot() -> None:
             await event.answer()
             _, _, pid, q_str = data.split(":")
             qty_val = int(q_str)
+            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb=f"prd:{pid}"):
+                return
             p = await ps_client.get_product_by_id(pid, refresh=False)
             p_name = p["name"] if p else pid
             USER_AWAITING[uid] = {
@@ -2546,22 +3012,30 @@ async def run_bot() -> None:
                     await event.delete()
                 except Exception:
                     pass
+            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+                return
             await render_deposit_menu(event)
             return
 
         if data.startswith("dep:method:"):
             await event.answer()
+            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+                return
             await render_deposit_amounts(event)
             return
 
         if data.startswith("dep:create:"):
             await event.answer()
+            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+                return
             _, _, _, amt_str = data.split(":")
             await create_and_show_deposit(client, event, int(float(amt_str)))
             return
 
         if data.startswith("dep:custom:"):
             await event.answer()
+            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+                return
             USER_AWAITING[uid] = {"type": "custom_deposit"}
             await send_or_edit(
                 event,
@@ -2621,20 +3095,23 @@ async def run_bot() -> None:
                 if (in_night and can_sp)
                 else f"☀️ *Chế độ Duyệt Bằng Tay (SePay đã dùng {used_sp}/{limit_sp} lượt tháng này) — Kiểm tra ngân hàng và bấm nút bên dưới:*"
             )
+            dep_uid = int(dep["user_id"])
+            dep_u = db.get_or_create_user(dep_uid)
             for adm_id in ADMIN_IDS:
                 try:
                     adm_rows = [
                         [
                             Button.inline(f"✅ Duyệt +{amt_vnd + bonus_vnd:,}đ", f"adm:dep_ok:{dep_id}".encode(), style="success"),
                             Button.inline("❌ Từ chối", f"adm:dep_no:{dep_id}".encode(), style="danger"),
-                        ]
+                        ],
+                        build_admin_user_buttons(dep_uid),
                     ]
                     memo_display = dep.get("memo") or f"NAP{dep_id}"
                     await client.send_message(
                         adm_id,
                         (
                             f"🔔 **YÊU CẦU DUYỆT NẠP TIỀN #{dep_id}**\n\n"
-                            f"👤 Khách: `{dep['user_id']}` (@{dep['username']})\n"
+                            f"👤 Khách hàng: {format_admin_user_line(dep_uid, dep_u)}\n"
                             f"🏦 Phương thức: **VIETQR**\n"
                             f"💵 Số tiền nạp: **{amt_vnd:,}đ**{bonus_line}\n"
                             f"📝 Nội dung CK: `{memo_display}`\n\n"
@@ -2665,6 +3142,7 @@ async def run_bot() -> None:
             point_rate = max(1, int(float(db.get_setting("point_value_vnd", "100") or 100)))
             tier = u.get("tier", "bronze")
             disc_pct = TIER_DISCOUNTS.get(tier.lower(), 0)
+            safe_name, _, uname_disp = get_user_display_parts(uid, u)
             rows = [
                 [
                     Button.inline(t(lang, "my_orders_btn"), b"prof:orders"),
@@ -2686,7 +3164,8 @@ async def run_bot() -> None:
                     lang,
                     "profile_title",
                     uid=uid,
-                    username=u["username"] or "user",
+                    full_name=safe_name,
+                    username=uname_disp,
                     tier=tier.upper(),
                     disc_pct=disc_pct,
                     balance=vnd_int(u["balance"]),
@@ -2798,11 +3277,12 @@ async def run_bot() -> None:
                             adm_id,
                             (
                                 f"✅ **KHÁCH ĐÃ NẠP TIỀN & MỞ KHÓA ĐƠN THU HỒI #{oid}**\n\n"
-                                f"👤 Khách hàng: `{uid}` (@{u.get('username') or 'user'})\n"
+                                f"👤 Khách hàng: {format_admin_user_line(uid, u)}\n"
                                 f"🛍️ Sản phẩm: **{o['product_name']}** (x{qty_ord})\n"
                                 f"💵 Đã thu đủ: **{req_vnd:,}đ** (Số dư còn: `{new_bal_after:,}đ`)\n"
                                 f"📦 Nguồn xuất: **{res.get('source_summary', 'Kho Thu Hồi')}**"
                             ),
+                            buttons=[build_admin_user_buttons(uid)],
                         )
                     except Exception:
                         pass
@@ -2982,7 +3462,20 @@ async def run_bot() -> None:
                 new_val = "0" if cur else "1"
                 db.set_setting("newbie_gift_enabled", new_val)
                 await event.answer(
-                    "🟢 Đã BẬT Phễu Quà Tân Thủ Join Kênh!" if new_val == "1" else "🔴 Đã TẮT Phễu Quà Tân Thủ!"
+                    "🟢 Đã BẬT Phễu Quà Tân Thủ Join Kênh + Nhóm!" if new_val == "1" else "🔴 Đã TẮT Phễu Quà Tân Thủ!"
+                )
+                await render_admin_folder(event, "marketing")
+                return
+
+            if data == "adm:tog_forcejoin":
+                cur = str(db.get_setting("force_join_enabled", "1") or "0").strip() == "1"
+                new_val = "0" if cur else "1"
+                db.set_setting("force_join_enabled", new_val)
+                _JOIN_VERIFIED_CACHE.clear()
+                await event.answer(
+                    "🟢 Đã BẬT Bắt buộc tham gia Kênh & Nhóm trước khi Mua/Nạp!"
+                    if new_val == "1"
+                    else "🔴 Đã TẮT Bắt buộc tham gia Kênh & Nhóm!"
                 )
                 await render_admin_folder(event, "marketing")
                 return
@@ -3078,12 +3571,75 @@ async def run_bot() -> None:
                 await render_admin_recent_orders(event)
                 return
 
+            if data.startswith("adm:userlist:"):
+                await event.answer()
+                page_idx = int(data.split(":")[2]) if len(data.split(":")) >= 3 and data.split(":")[2].isdigit() else 0
+                await render_admin_user_list(event, page=page_idx)
+                return
+
+            if data.startswith("adm:uinfo:"):
+                await event.answer()
+                target_uid = int(data.split(":")[2])
+                await render_admin_user_detail(client, event, target_uid)
+                return
+
+            if data.startswith("adm:msg:"):
+                await event.answer()
+                target_uid = int(data.split(":")[2])
+                tu = db.get_or_create_user(target_uid)
+                safe_name, _, _ = get_user_display_parts(target_uid, tu)
+                raw_u = str(tu.get("username") or "").strip().lstrip("@")
+                direct_url = f"https://t.me/{raw_u}" if (raw_u and db.is_valid_tg_username(raw_u)) else f"tg://user?id={target_uid}"
+                USER_AWAITING[uid] = {
+                    "type": "admin_direct_msg",
+                    "target_uid": target_uid,
+                }
+                await send_or_edit(
+                    event,
+                    (
+                        f"💬 **NHẮN TIN TRỰC TIẾP TỚI KHÁCH HÀNG**\n\n"
+                        f"{format_admin_user_line(target_uid, tu)}\n"
+                        f"🔗 Mở khung chat riêng: **[👉 Bấm vào đây để mở Telegram cá nhân của khách]({direct_url})**\n\n"
+                        "✍️ **Hoặc nhập nội dung tin nhắn tại đây để gửi thẳng cho khách qua Bot** "
+                        "*(Khách sẽ nhận được ngay kèm nút `💬 Phản hồi lại Admin`, luôn gửi được 100% kể cả khi khách không có `@username`)*:"
+                    ),
+                    buttons=[
+                        [Button.url(f"🔗 Mở Khung Chat Cá Nhân ({safe_name[:14]})", direct_url)],
+                        [Button.inline("« Quay lại Hồ sơ khách", f"adm:uinfo:{target_uid}".encode())],
+                    ],
+                    force_new=True,
+                )
+                return
+
+            if data.startswith("adm:addbal_u:"):
+                await event.answer()
+                target_uid = int(data.split(":")[2])
+                tu = db.get_or_create_user(target_uid)
+                USER_AWAITING[uid] = {
+                    "type": "admin_addbal_single",
+                    "target_uid": target_uid,
+                }
+                await send_or_edit(
+                    event,
+                    (
+                        f"💵 **CỘNG / TRỪ SỐ DƯ CHO KHÁCH HÀNG**\n\n"
+                        f"👤 Khách hàng: {format_admin_user_line(target_uid, tu)}\n"
+                        f"💰 Số dư hiện tại: **{vnd_int(tu.get('balance', 0)):,}đ**\n\n"
+                        "👉 Nhập **số tiền VNĐ** cần cộng hoặc trừ (Ví dụ: `50000`, `50k` hoặc `-20000`):"
+                    ),
+                    buttons=[[Button.inline("« Hủy", f"adm:uinfo:{target_uid}".encode())]],
+                )
+                return
+
             if data == "adm:finduser":
                 await event.answer()
                 USER_AWAITING[uid] = {"type": "admin_finduser"}
                 await send_or_edit(
                     event,
-                    "🔍 **TRA CỨU KHÁCH HÀNG**\n\nNhập `Telegram ID` hoặc `@username` của khách hàng cần kiểm tra:",
+                    (
+                        "🔍 **TRA CỨU KHÁCH HÀNG (TÊN HIỂN THỊ / ID / @USERNAME)**\n\n"
+                        "Nhập **Tên hiển thị** (ví dụ: `Vũ`, `Nguyễn Văn A`), `Telegram ID` hoặc `@username` của khách hàng cần kiểm tra:"
+                    ),
                     buttons=[[Button.inline("« Hủy", b"adm:dir:users")]],
                 )
                 return
@@ -3422,17 +3978,21 @@ async def run_bot() -> None:
                 amt_vnd = vnd_int(dep["amount_vnd"])
                 bonus_vnd, bonus_pct = db.compute_deposit_bonus(amt_vnd)
                 total_added = amt_vnd + bonus_vnd
-                new_bal = db.adjust_balance(dep["user_id"], total_added)
+                dep_uid = int(dep["user_id"])
+                new_bal = db.adjust_balance(dep_uid, total_added)
                 await reward_referrer_on_deposit(client, dep)
                 bonus_adm = f" (Gồm KM `+{bonus_vnd:,}đ`)" if bonus_vnd > 0 else ""
+                target_user = db.get_or_create_user(dep_uid)
                 await send_or_edit(
                     event,
                     f"✅ **ĐÃ DUYỆT ĐƠN NẠP #{dep_id}**\n"
-                    f"👤 Khách: `{dep['user_id']}` (@{dep['username']})\n"
+                    f"👤 Khách hàng: {format_admin_user_line(dep_uid, target_user)}\n"
                     f"💵 Đã cộng: **+{total_added:,}đ**{bonus_adm} (Số dư mới: **{new_bal:,}đ**)",
-                    buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    buttons=[
+                        build_admin_user_buttons(dep_uid),
+                        [Button.inline("« Về Bảng Admin", b"adm:home")],
+                    ],
                 )
-                target_user = db.get_or_create_user(int(dep["user_id"]))
                 u_lang = target_user.get("language", "vi")
                 try:
                     if bonus_vnd > 0:
@@ -3448,7 +4008,7 @@ async def run_bot() -> None:
                         )
                     else:
                         msg_txt = t(u_lang, "deposit_approved_msg", dep_id=dep_id, amt_vnd=amt_vnd, new_bal=new_bal)
-                    await client.send_message(dep["user_id"], msg_txt)
+                    await client.send_message(dep_uid, msg_txt)
                 except Exception:
                     pass
                 return
@@ -3461,16 +4021,20 @@ async def run_bot() -> None:
                     return
                 db.update_deposit_status(dep_id, "rejected")
                 amt_vnd = vnd_int(dep["amount_vnd"])
+                dep_uid = int(dep["user_id"])
+                target_user = db.get_or_create_user(dep_uid)
                 await send_or_edit(
                     event,
-                    f"❌ **ĐÃ TỪ CHỐI ĐƠN NẠP #{dep_id}** ({amt_vnd:,}đ) của `{dep['user_id']}`.",
-                    buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    f"❌ **ĐÃ TỪ CHỐI ĐƠN NẠP #{dep_id}** ({amt_vnd:,}đ) của {format_admin_user_line(dep_uid, target_user)}.",
+                    buttons=[
+                        build_admin_user_buttons(dep_uid),
+                        [Button.inline("« Về Bảng Admin", b"adm:home")],
+                    ],
                 )
-                target_user = db.get_or_create_user(int(dep["user_id"]))
                 u_lang = target_user.get("language", "vi")
                 try:
                     await client.send_message(
-                        dep["user_id"],
+                        dep_uid,
                         t(u_lang, "deposit_rejected_msg", dep_id=dep_id, amt_vnd=amt_vnd),
                     )
                 except Exception:
@@ -3481,6 +4045,14 @@ async def run_bot() -> None:
     async def handle_text_input(event: events.NewMessage.Event) -> None:
         text = (event.raw_text or "").strip()
         if not event.is_private:
+            # Cập nhật tên hiển thị & username của thành viên vừa nhắn trong nhóm CSKH vào DB
+            if event.sender_id and not event.out:
+                try:
+                    sender_grp = await event.get_sender()
+                    g_uname, g_fname = extract_sender_identity(sender_grp, int(event.sender_id))
+                    db.get_or_create_user(int(event.sender_id), username=g_uname, full_name=g_fname)
+                except Exception:
+                    pass
             # Trợ lý CSKH tự động trong nhóm @KingToolShopSupport
             if not text or event.out:
                 return
@@ -3504,18 +4076,21 @@ async def run_bot() -> None:
                     )
                     if dep["status"] == "pending":
                         amt_vnd = vnd_int(dep["amount_vnd"])
+                        dep_uid = int(dep["user_id"])
+                        dep_u = db.get_or_create_user(dep_uid)
                         for adm_id in ADMIN_IDS:
                             try:
                                 await client.send_message(
                                     adm_id,
                                     f"🆘 **KHÁCH ĐANG NHẮN HỖ TRỢ ĐƠN NẠP #{dep['id']} TRÊN NHÓM CSKH**\n\n"
-                                    f"👤 Khách: `{dep['user_id']}` (@{dep['username']})\n"
+                                    f"👤 Khách hàng: {format_admin_user_line(dep_uid, dep_u)}\n"
                                     f"💵 Số tiền: **{amt_vnd:,}đ** | Nội dung: `{dep['memo']}`",
                                     buttons=[
                                         [
                                             Button.inline(f"✅ Duyệt +{amt_vnd:,}đ", f"adm:dep_ok:{dep['id']}".encode(), style="success"),
                                             Button.inline("❌ Từ chối", f"adm:dep_no:{dep['id']}".encode(), style="danger"),
-                                        ]
+                                        ],
+                                        build_admin_user_buttons(dep_uid),
                                     ],
                                 )
                             except Exception:
@@ -3616,6 +4191,34 @@ async def run_bot() -> None:
             await create_and_show_deposit(client, event, amt_vnd)
             return
 
+        if atype == "user_reply_admin":
+            USER_AWAITING.pop(uid, None)
+            for adm_id in ADMIN_IDS:
+                try:
+                    await client.send_message(
+                        adm_id,
+                        (
+                            f"💬 **TIN NHẮN TRỰC TIẾP TỪ KHÁCH HÀNG**\n\n"
+                            f"👤 Khách hàng: {format_admin_user_line(uid, u)}\n"
+                            f"💵 Số dư ví: **{vnd_int(u.get('balance', 0)):,}đ** | Đã mua: **{u.get('orders_count', 0)} đơn**\n\n"
+                            f"📝 **Nội dung khách nhắn:**\n{text}"
+                        ),
+                        buttons=[
+                            [
+                                Button.inline("💬 Trả lời lại khách", f"adm:msg:{uid}".encode(), style="primary"),
+                                Button.inline("👤 Hồ sơ khách", f"adm:uinfo:{uid}".encode()),
+                            ]
+                        ],
+                    )
+                except Exception:
+                    pass
+            await event.respond(
+                "✅ **Đã gửi tin nhắn của bạn tới Admin thành công!**\n"
+                "⚡ Admin sẽ phản hồi trực tiếp cho bạn ngay trên Bot này.",
+                buttons=[[Button.inline(t(lang, "btn_back"), b"menu:home")]],
+            )
+            return
+
         if atype == "warranty_request":
             oid = int(awaiting["order_id"])
             USER_AWAITING.pop(uid, None)
@@ -3630,7 +4233,7 @@ async def run_bot() -> None:
                         adm_id,
                         (
                             f"🛠️ **YÊU CẦU BẢO HÀNH ĐƠN HÀNG #{oid}**\n\n"
-                            f"👤 Khách hàng: `{uid}` (@{u['username']})\n"
+                            f"👤 Khách hàng: {format_admin_user_line(uid, u)}\n"
                             f"🛍️ Sản phẩm: **{o['product_name']}** (x{o['quantity']})\n"
                             f"🔗 Mã đơn ProdSeller: `{ps_oid}`\n"
                             f"🔑 Key đã giao: `{clean_keys}`\n"
@@ -3644,7 +4247,8 @@ async def run_bot() -> None:
                                     f"adm:warr_reply:{uid}:{oid}".encode(),
                                     style="primary",
                                 )
-                            ]
+                            ],
+                            build_admin_user_buttons(uid),
                         ],
                     )
                 except Exception:
@@ -3656,6 +4260,74 @@ async def run_bot() -> None:
             return
 
         if not is_admin(uid):
+            return
+
+        if atype == "admin_direct_msg":
+            target_uid = int(awaiting["target_uid"])
+            USER_AWAITING.pop(uid, None)
+            tu = db.get_or_create_user(target_uid)
+            msg_md = (
+                f"💬 **TIN NHẮN TỪ ADMIN KINGTOOL SHOP**\n\n"
+                f"{text}\n\n"
+                "👇 *Bấm nút bên dưới nếu bạn muốn trả lời lại Admin:*"
+            )
+            msg_html = (
+                f"💬 <b>TIN NHẮN TỪ ADMIN KINGTOOL SHOP</b>\n\n"
+                f"{text}\n\n"
+                "👇 <i>Bấm nút bên dưới nếu bạn muốn trả lời lại Admin:</i>"
+            )
+            sent_ok = await send_message_to_user_safe(
+                client,
+                target_uid,
+                text_md=msg_md,
+                buttons=[[Button.inline("💬 Phản hồi lại Admin", b"usr:reply_adm", style="success")]],
+                html_fallback=msg_html,
+                inline_kb_fallback=[[{"text": "💬 Phản hồi lại Admin", "callback_data": "usr:reply_adm"}]],
+            )
+            if sent_ok:
+                await event.respond(
+                    f"✅ **Đã gửi tin nhắn trực tiếp tới khách hàng!**\n"
+                    f"{format_admin_user_line(target_uid, tu)}\n\n"
+                    f"📝 *Nội dung đã gửi:*\n`{text}`",
+                    buttons=[
+                        build_admin_user_buttons(target_uid),
+                        [Button.inline("« Về Bảng Admin", b"adm:home")],
+                    ],
+                )
+            else:
+                await event.respond(
+                    f"❌ Không thể gửi tin nhắn tới {format_admin_user_line(target_uid, tu)} (Khách có thể đã chặn Bot).",
+                    buttons=[[Button.inline("« Về Hồ sơ khách", f"adm:uinfo:{target_uid}".encode())]],
+                )
+            return
+
+        if atype == "admin_addbal_single":
+            target_uid = int(awaiting["target_uid"])
+            try:
+                amt_vnd = parse_vnd_input(text)
+                if amt_vnd == 0:
+                    raise ValueError
+            except ValueError:
+                await event.respond(
+                    "❌ Số tiền không hợp lệ. Vui lòng nhập số tiền VNĐ (ví dụ `50000`, `50k` hoặc `-20000`):",
+                    buttons=[[Button.inline("« Hủy", f"adm:uinfo:{target_uid}".encode())]],
+                )
+                return
+            USER_AWAITING.pop(uid, None)
+            tu = db.get_or_create_user(target_uid)
+            new_bal = db.adjust_balance(target_uid, amt_vnd)
+            await event.respond(
+                f"✅ Đã cập nhật **{amt_vnd:+,}đ** cho khách {format_admin_user_line(target_uid, tu)}.\n"
+                f"💵 Số dư mới: **{new_bal:,}đ**"
+            )
+            try:
+                await client.send_message(
+                    target_uid,
+                    f"💰 Số dư ví của bạn vừa được cập nhật **{amt_vnd:+,}đ**.\n💵 Số dư hiện tại: **{new_bal:,}đ**",
+                )
+            except Exception:
+                pass
+            await render_admin_user_detail(client, event, target_uid, force_new=True)
             return
 
         if atype == "admin_bsrc_add":
@@ -3817,39 +4489,18 @@ async def run_bot() -> None:
                     f"❌ Không tìm thấy khách hàng nào khớp với `{text}`.",
                     buttons=[
                         [
+                            Button.inline("🔍 Thử tìm lại", b"adm:finduser", style="primary"),
+                            Button.inline("👥 Danh sách khách", b"adm:userlist:0"),
+                        ],
+                        [
                             Button.inline("« Về Thư mục Khách Hàng", b"adm:dir:users"),
                             Button.inline("⚙️ Bảng Admin", b"adm:home"),
-                        ]
+                        ],
                     ],
                 )
                 return
-            f_uid = found["telegram_id"]
-            f_orders = db.get_user_orders(f_uid, limit=3)
-            ord_summary = "\n".join(
-                f"  • `#{o['id']}` {o['product_name'][:20]} (x{o['quantity']}) — {vnd_int(o['retail_price']):,}đ"
-                for o in f_orders
-            ) or "  (Chưa có đơn hàng)"
-            info_txt = (
-                f"👤 **THÔNG TIN KHÁCH HÀNG**\n\n"
-                f"🆔 ID: `{f_uid}`\n"
-                f"👤 Username: @{found['username'] or 'không_có'}\n"
-                f"💎 Hạng: **{found['tier'].upper()}**\n"
-                f"💵 Số dư hiện tại: **{vnd_int(found['balance']):,}đ**\n"
-                f"⭐ Điểm thưởng: **{found['points']}**\n"
-                f"📦 Tổng đơn đã mua: **{found['orders_count']}** (Chi tiêu: **{vnd_int(found['total_spent']):,}đ**)\n"
-                f"📅 Ngày tham gia: `{found['joined_at']}`\n\n"
-                f"🛍️ **Đơn gần nhất:**\n{ord_summary}"
-            )
-            await event.respond(
-                info_txt,
-                buttons=[
-                    [Button.inline("💵 Cộng/Trừ số dư khách này", b"adm:addbal", style="primary")],
-                    [
-                        Button.inline("« Về Thư mục Khách Hàng", b"adm:dir:users"),
-                        Button.inline("⚙️ Bảng Admin", b"adm:home"),
-                    ],
-                ],
-            )
+            f_uid = int(found["telegram_id"])
+            await render_admin_user_detail(client, event, f_uid, force_new=True)
             return
 
         if atype == "admin_broadcast":

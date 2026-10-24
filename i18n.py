@@ -91,8 +91,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "deposit_rejected_msg": "❌ Yêu cầu nạp tiền `#{dep_id}` ({amt_vnd:,}đ) chưa nhận được thanh toán hoặc bị từ chối.",
         "profile_title": (
             "👤 **Hồ sơ của bạn**\n\n"
+            "📛 Tên hiển thị: **{full_name}**\n"
             "🆔 Telegram ID: `{uid}`\n"
-            "👤 Username: @{username}\n"
+            "👤 Username: {username}\n"
             "💎 Hạng: **{tier}** *(Giảm {disc_pct}% | Silver ≥ 600k, Gold ≥ 2.5M)*\n"
             "💵 Số dư: **{balance:,}đ**\n"
             "⭐ Điểm thưởng: **{points} điểm**\n"
@@ -184,16 +185,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_newbie_gift": "🎁 Nhận Quà Tân Thủ (Miễn Phí)",
         "newbie_gift_title": (
             "🎁 **QUÀ TẶNG TÂN THỦ KINGTOOL SHOP**\n\n"
-            "Chào mừng bạn mới! Chỉ cần tham gia kênh thông báo chính thức **@{channel}** để nhận ngay bộ quà tặng:\n"
+            "Chào mừng bạn mới! Chỉ cần tham gia **Kênh Thông Báo @{channel}** và **Nhóm Cộng Đồng @{group}** để nhận ngay bộ quà tặng:\n"
             "• ⭐ **+{pts} Điểm thưởng tích lũy** *(Đủ 10 điểm đổi thẳng ra tiền mặt VNĐ trong ví!)*\n"
             "• 🎟️ **Mã giảm giá `{code}`** *(Tự động kích hoạt giảm giá ngay cho đơn hàng đầu tiên của bạn!)*\n\n"
             "👇 **Thực hiện trong 5 giây:**\n"
-            "1️⃣ Bấm nút **📣 Bước 1: Tham gia Kênh @{channel}** bên dưới.\n"
-            "2️⃣ Quay lại đây bấm **✅ Bước 2: Đã tham gia — Nhận Quà Ngay!**"
+            "1️⃣ Bấm nút **📣 Bước 1: Tham gia Kênh @{channel}**\n"
+            "2️⃣ Bấm nút **💬 Bước 2: Tham gia Nhóm @{group}**\n"
+            "3️⃣ Quay lại đây bấm **✅ Đã tham gia đủ — Nhận Quà Ngay!**"
         ),
         "newbie_gift_join_btn": "📣 Bước 1: Tham gia Kênh @{channel}",
-        "newbie_gift_claim_btn": "✅ Bước 2: Đã tham gia — Nhận Quà Ngay!",
-        "newbie_gift_not_joined": "⚠️ Hệ thống kiểm tra thấy bạn chưa tham gia kênh @{channel}! Hãy bấm nút Bước 1 để Join kênh trước rồi bấm Nhận quà nhé.",
+        "newbie_gift_group_btn": "💬 Bước 2: Tham gia Nhóm @{group}",
+        "newbie_gift_claim_btn": "✅ Bước 3: Đã tham gia đủ — Nhận Quà Ngay!",
+        "newbie_gift_not_joined": "⚠️ Hệ thống kiểm tra thấy bạn chưa tham gia đủ @{channel} và @{group}! Hãy bấm nút Bước 1 & Bước 2 để tham gia trước rồi bấm Nhận quà nhé.",
         "newbie_gift_already_claimed": "✅ Bạn đã nhận gói Quà Tân Thủ này trước đó rồi!",
         "newbie_gift_success": (
             "🎉 **CHÚC MỪNG! BẠN ĐÃ NHẬN QUÀ TÂN THỦ THÀNH CÔNG!**\n\n"
@@ -202,6 +205,21 @@ STRINGS: dict[str, dict[str, str]] = {
             "👉 Hãy bấm **🛍️ Mở Kho Sản Phẩm (Đã áp sẵn mã giảm giá)** bên dưới để xem mức giá ưu đãi dành riêng cho bạn!"
         ),
         "newbie_gift_shop_btn": "🛍️ Mở Kho Sản Phẩm (Đã áp sẵn mã {code})",
+        "force_join_title": (
+            "🔒 **YÊU CẦU BẮT BUỘC TRƯỚC KHI MUA HÀNG**\n\n"
+            "👋 Chào **{full_name}** (`{uid}`), để mở khóa mua hàng tự động và giúp Admin có thể **nhắn tin hỗ trợ & bảo hành trực tiếp** cho bạn *(kể cả khi tài khoản Telegram của bạn không đặt `@username`)*, bạn bắt buộc phải tham gia **Kênh Thông Báo** và **Nhóm Cộng Đồng (Group)** của Shop:\n\n"
+            "1️⃣ **Kênh Bảng Giá (`@{channel}`):** {ch_status}\n"
+            "2️⃣ **Nhóm Cộng Đồng & CSKH (`@{group}`):** {grp_status}\n\n"
+            "🎁 *Khi tham gia đủ cả 2 nơi, tài khoản của bạn sẽ được hiển thị tên rõ ràng với Admin để hỗ trợ 24/7 và nhận ưu đãi thành viên!*\n\n"
+            "👇 **Hãy bấm vào nút bên dưới để tham gia (chỉ mất 3 giây), sau đó bấm nút Xác nhận màu xanh:**"
+        ),
+        "force_join_ch_btn": "{badge} Bước 1: Tham gia Kênh @{channel}",
+        "force_join_grp_btn": "{badge} Bước 2: Tham gia Nhóm @{group}",
+        "force_join_verify_btn": "✅ Tôi đã tham gia đủ — Tiếp tục mua hàng!",
+        "force_join_missing_both": "⚠️ Bạn chưa tham gia Kênh @{channel} và Nhóm @{group}! Vui lòng bấm cả 2 nút Bước 1 & Bước 2 để tham gia trước khi mua hàng nhé.",
+        "force_join_missing_channel": "⚠️ Bạn đã vào Nhóm nhưng chưa tham gia Kênh @{channel}! Vui lòng bấm nút Bước 1 để Join kênh nhé.",
+        "force_join_missing_group": "⚠️ Bạn đã vào Kênh nhưng chưa tham gia Nhóm @{group}! Vui lòng bấm nút Bước 2 để Join nhóm cộng đồng nhé.",
+        "force_join_ok_toast": "🎉 Xác nhận thành công! Đã mở khóa mua hàng cho bạn!",
         "deposit_reminder_msg": (
             "💡 **Nhắc nhở đơn nạp tiền `#{dep_id}` ({amount_vnd:,}đ)**\n\n"
             "Hệ thống nhận thấy bạn vừa tạo mã QR nạp **{amount_vnd:,}đ** (Nội dung CK: `{memo}`) nhưng giao dịch chưa hoàn tất.\n\n"
@@ -293,8 +311,9 @@ STRINGS: dict[str, dict[str, str]] = {
         "deposit_rejected_msg": "❌ Deposit request `#{dep_id}` ({amt_vnd:,}đ) was not received or was declined.",
         "profile_title": (
             "👤 **Your Profile**\n\n"
+            "📛 Display Name: **{full_name}**\n"
             "🆔 Telegram ID: `{uid}`\n"
-            "👤 Username: @{username}\n"
+            "👤 Username: {username}\n"
             "💎 Tier: **{tier}** *({disc_pct}% off | Silver ≥ 600k, Gold ≥ 2.5M)*\n"
             "💵 Balance: **{balance:,}đ**\n"
             "⭐ Points: **{points} pts**\n"
@@ -384,16 +403,18 @@ STRINGS: dict[str, dict[str, str]] = {
         "btn_newbie_gift": "🎁 Free Newbie Gift",
         "newbie_gift_title": (
             "🎁 **KINGTOOL SHOP NEWBIE GIFT**\n\n"
-            "Welcome! Join our official announcement channel **@{channel}** to claim your free starter pack:\n"
+            "Welcome! Join our official announcement channel **@{channel}** and community group **@{group}** to claim your free starter pack:\n"
             "• ⭐ **+{pts} Reward Points** *(Redeemable for VNĐ wallet balance at 10 pts!)*\n"
             "• 🎟️ **Voucher `{code}`** *(Auto-applied discount for your first order!)*\n\n"
             "👇 **Complete in 5 seconds:**\n"
-            "1️⃣ Tap **📣 Step 1: Join @{channel}** below.\n"
-            "2️⃣ Tap **✅ Step 2: Joined — Claim Gift Now!**"
+            "1️⃣ Tap **📣 Step 1: Join Channel @{channel}**\n"
+            "2️⃣ Tap **💬 Step 2: Join Group @{group}**\n"
+            "3️⃣ Tap **✅ Step 3: Joined Both — Claim Gift Now!**"
         ),
         "newbie_gift_join_btn": "📣 Step 1: Join Channel @{channel}",
-        "newbie_gift_claim_btn": "✅ Step 2: Joined — Claim Gift Now!",
-        "newbie_gift_not_joined": "⚠️ You haven't joined @{channel} yet! Please tap Step 1 to join the channel first.",
+        "newbie_gift_group_btn": "💬 Step 2: Join Group @{group}",
+        "newbie_gift_claim_btn": "✅ Step 3: Joined Both — Claim Gift Now!",
+        "newbie_gift_not_joined": "⚠️ You haven't joined both @{channel} and @{group} yet! Please tap Step 1 & Step 2 first.",
         "newbie_gift_already_claimed": "✅ You have already claimed your Newbie Gift!",
         "newbie_gift_success": (
             "🎉 **CONGRATULATIONS! NEWBIE GIFT CLAIMED!**\n\n"
@@ -402,6 +423,20 @@ STRINGS: dict[str, dict[str, str]] = {
             "👉 Tap **🛍️ Browse Products (Voucher {code} Applied)** below to shop with your instant discount!"
         ),
         "newbie_gift_shop_btn": "🛍️ Browse Products (Voucher {code} Applied)",
+        "force_join_title": (
+            "🔒 **MANDATORY COMMUNITY JOIN BEFORE PURCHASING**\n\n"
+            "👋 Hello **{full_name}** (`{uid}`), to unlock automated purchasing and allow Admin to **message & support you directly** *(even if you don't have a Telegram `@username`)*, please join our official **Channel** and **Community Group**:\n\n"
+            "1️⃣ **Official Channel (`@{channel}`):** {ch_status}\n"
+            "2️⃣ **Community & Support Group (`@{group}`):** {grp_status}\n\n"
+            "👇 **Tap the buttons below to join (takes 3 seconds), then tap the green Verify button:**"
+        ),
+        "force_join_ch_btn": "{badge} Step 1: Join Channel @{channel}",
+        "force_join_grp_btn": "{badge} Step 2: Join Group @{group}",
+        "force_join_verify_btn": "✅ I Have Joined Both — Continue Shopping!",
+        "force_join_missing_both": "⚠️ You haven't joined @{channel} and @{group} yet! Please join both before purchasing.",
+        "force_join_missing_channel": "⚠️ You haven't joined Channel @{channel} yet! Please tap Step 1.",
+        "force_join_missing_group": "⚠️ You haven't joined Group @{group} yet! Please tap Step 2.",
+        "force_join_ok_toast": "🎉 Verified! Purchasing is now unlocked!",
         "deposit_reminder_msg": (
             "💡 **Reminder for Pending Deposit `#{dep_id}` ({amount_vnd:,}đ)**\n\n"
             "We noticed you generated a QR code for **{amount_vnd:,}đ** (Memo: `{memo}`) that hasn't been completed yet.\n\n"
