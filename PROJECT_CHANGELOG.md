@@ -5,6 +5,19 @@
 
 ---
 
+## [v3.0.3] - 2026-10-26: Kiểm Định Toàn Hệ Thống & Sửa Triệt Để Các Lỗi Luồng Khách Hàng Mới Nạp Tiền / Mua Hàng (`0` Lỗi AST)
+
+### 🛡️ 1. Phát Hiện & Sửa Triệt Để Các Lỗi Tiềm Ẩn Trong Hành Trình Khách Hàng Mới (`bot.py`)
+- **Sửa lỗi chữ ký hàm `ensure_user_joined_community` tại 6 điểm chạm của khách hàng (`menu:deposit`, `dep:method:`, `dep:create:`, `dep:custom:`, `vch:ask:`, `qtyc:`):**
+  - Trước đó 6 nhánh callback này truyền thừa tham số vị trí `(uid, lang)` cùng lúc với `resume_cb=...` gây lỗi `TypeError: got multiple values for argument 'resume_cb'` khi khách bấm nút Nạp tiền hoặc Nhập mã giảm giá. Đã chuẩn hóa toàn bộ điểm gọi và mở rộng chữ ký hàm `ensure_user_joined_community` tương thích ngược 100%.
+- **Đồng bộ tự động khởi tạo mã Quà Tân Thủ (`TANTHU10`) tại cổng xác minh tham gia Kênh & Nhóm (`fjoin:chk:`):**
+  - Đảm bảo khi khách hàng mới tham gia Kênh & Nhóm và bấm xác nhận, mã giảm giá Tân thủ luôn tự động được khởi tạo trong `telebot.vouchers` và gắn sẵn vào giỏ hàng của khách.
+- **Sửa 3 điểm gọi hàm phụ trợ (`unlock_ord:`, nhóm CSKH & lệnh `/taikhoan`):**
+  - Chuẩn hóa `db.record_purchase_stats(uid, req_vnd)` trong `unlock_ord:`, `db.get_order_by_id(oid)` trong trợ lý nhóm CSKH, và bổ sung tham số `full_name` cho mẫu `profile_title` trong lệnh `/taikhoan`.
+- **Kiểm định AST toàn cục (`check_all_calls.py`):** Đạt **0 lỗi** chữ ký hàm và **0 lỗi** từ khóa đa ngôn ngữ (`vi`/`en`) trên toàn bộ 70 hàm của dự án.
+
+---
+
 ## [v3.0.2] - 2026-10-26: Menu Gợi Ý Lệnh Khi Gõ `/` Riêng Biệt Cho Admin Và Khách Hàng (`Scoped Bot Commands`)
 
 ### ⚡ 1. Gợi Ý Lệnh Nhanh Khi Gõ `/` Hoặc Bấm Nút `☰ Menu` Trên Telegram (`setup_bot_commands_menu` trong `bot.py`)

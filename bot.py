@@ -601,6 +601,7 @@ async def render_force_join_gate(
 async def ensure_user_joined_community(
     client: TelegramClient,
     event: Any,
+    *extra_args: Any,
     resume_cb: str = "menu:products",
     back_cb: str = "menu:home",
 ) -> bool:
@@ -3248,10 +3249,12 @@ async def run_bot() -> None:
                 )
                 return
 
-            # Tự động tặng luôn Quà Tân Thủ (+5 điểm + tự áp mã WELCOME15) nếu khách chưa nhận
+            # Tự động tặng luôn Quà Tân Thủ (+5 điểm + tự áp mã TANTHU10) nếu khách chưa nhận
             if str(db.get_setting("newbie_gift_enabled", "1") or "0").strip() == "1" and int(u.get("gift_claimed", 0) or 0) == 0:
                 gift_pts = max(1, int(float(db.get_setting("newbie_gift_points", "5") or 5)))
-                gift_code = (db.get_setting("newbie_gift_voucher", "WELCOME15") or "WELCOME15").strip().upper()
+                gift_code = (db.get_setting("newbie_gift_voucher", "TANTHU10") or "TANTHU10").strip().upper()
+                if not db.get_voucher(gift_code):
+                    db.create_or_update_voucher(gift_code, "percent", 10.0, max_uses=0)
                 claimed_ok, _ = db.claim_newbie_gift(uid, bonus_points=gift_pts)
                 if claimed_ok:
                     USER_ACTIVE_VOUCHER[uid] = gift_code
@@ -3330,7 +3333,7 @@ async def run_bot() -> None:
         if data.startswith("qtyc:"):
             await event.answer()
             pid = data.split(":", 1)[1]
-            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb=f"prd:{pid}"):
+            if not await ensure_user_joined_community(client, event, resume_cb=f"prd:{pid}", back_cb=f"prd:{pid}"):
                 return
             p = await ps_client.get_product_by_id(pid, refresh=False)
             if not p:
@@ -3354,7 +3357,7 @@ async def run_bot() -> None:
             await event.answer()
             _, _, pid, q_str = data.split(":")
             qty_val = int(q_str)
-            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb=f"prd:{pid}"):
+            if not await ensure_user_joined_community(client, event, resume_cb=f"prd:{pid}", back_cb=f"prd:{pid}"):
                 return
             p = await ps_client.get_product_by_id(pid, refresh=False)
             p_name = p["name"] if p else pid
@@ -3437,21 +3440,21 @@ async def run_bot() -> None:
                     await event.delete()
                 except Exception:
                     pass
-            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+            if not await ensure_user_joined_community(client, event, resume_cb="menu:deposit"):
                 return
             await render_deposit_menu(event)
             return
 
         if data.startswith("dep:method:"):
             await event.answer()
-            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+            if not await ensure_user_joined_community(client, event, resume_cb="menu:deposit"):
                 return
             await render_deposit_amounts(event)
             return
 
         if data.startswith("dep:create:"):
             await event.answer()
-            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+            if not await ensure_user_joined_community(client, event, resume_cb="menu:deposit"):
                 return
             _, _, _, amt_str = data.split(":")
             await create_and_show_deposit(client, event, int(float(amt_str)))
@@ -3459,7 +3462,7 @@ async def run_bot() -> None:
 
         if data.startswith("dep:custom:"):
             await event.answer()
-            if not await ensure_user_joined_community(client, event, uid, lang, resume_cb="menu:deposit"):
+            if not await ensure_user_joined_community(client, event, resume_cb="menu:deposit"):
                 return
             USER_AWAITING[uid] = {"type": "custom_deposit"}
             await send_or_edit(
@@ -3693,7 +3696,7 @@ async def run_bot() -> None:
                     src_summary = str(res.get("source_summary", "Kho Chính"))
 
                 db.mark_order_delivered(oid, keys)
-                db.record_user_purchase(uid, req_vnd, qty_ord)
+                db.record_purchase_stats(uid, req_vnd)
                 keys_block = "\n".join(keys) if keys else "Đã kích hoạt Bảo Hành!"
                 await send_or_edit(
                     event,
@@ -4583,7 +4586,7 @@ async def run_bot() -> None:
             ord_match = re.search(r"(?:#|đơn\s+|order\s+)(\d{1,6})\b", text, re.IGNORECASE)
             if ord_match:
                 oid = int(ord_match.group(1))
-                o = db.get_order(oid)
+                o = db.get_order_by_id(oid)
                 if o:
                     await event.reply(
                         f"🤖 **[TRỢ LÝ CSKH TỰ ĐỘNG]**\n\n"
@@ -4677,6 +4680,7 @@ async def run_bot() -> None:
                 pts = int(u_cmd.get("points", 0) or 0)
                 tier = u_cmd.get("tier", "bronze")
                 disc_pct = TIER_DISCOUNTS.get(tier.lower(), 0)
+                safe_name_cmd, _, _ = get_user_display_parts(uid_cmd, u_cmd)
                 rows_prof = [
                     [Button.inline(t(lang_cmd, "my_orders_btn"), b"prof:orders")],
                     [Button.inline(t(lang_cmd, "referral_btn"), b"prof:ref")],
@@ -4687,6 +4691,7 @@ async def run_bot() -> None:
                     t(
                         lang_cmd,
                         "profile_title",
+                        full_name=safe_name_cmd,
                         uid=uid_cmd,
                         username=u_cmd["username"],
                         tier=tier.upper(),
