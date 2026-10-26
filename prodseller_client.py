@@ -72,7 +72,12 @@ BRAND_GRID_ROWS: list[list[str]] = [
     ["JetBrains", "Linear Business"],
     ["Scribd", "Gmail", "Outlook"],
     ["Telegram", "iLovePDF", "Miro"],
-    ["edX", "Supercut"],
+    ["edX", "Supercut", "Perplexity"],
+    ["Zoom", "Runway", "Krea"],
+    ["OpenArt", "LinkedIn", "API Token"],
+    ["Crunchyroll", "Deezer", "Shahid"],
+    ["Brain.fm", "Warp", "Xingtu"],
+    ["Render", "Apify"],
 ]
 
 # Custom Emoji Icon IDs chính thức cho từng Thương hiệu trên lưới (trích xuất từ DanteHub & ProdSeller)
@@ -212,6 +217,21 @@ GROUP_EMOJI: dict[str, str] = {
     "Miro": "📝 ",
     "edX": "🎓 ",
     "Supercut": "🎬 ",
+    "Perplexity": "🔍 ",
+    "Zoom": "📹 ",
+    "Runway": "🎬 ",
+    "Krea": "🎨 ",
+    "OpenArt": "🖼️ ",
+    "LinkedIn": "💼 ",
+    "API Token": "🔑 ",
+    "Crunchyroll": "🍥 ",
+    "Deezer": "🎵 ",
+    "Shahid": "📺 ",
+    "Brain.fm": "🎧 ",
+    "Warp": "💻 ",
+    "Xingtu": "📸 ",
+    "Render": "☁️ ",
+    "Apify": "🕷️ ",
 }
 
 PRODUCT_KEYWORD_ICONS: list[tuple[str, int | None, str]] = [
@@ -292,12 +312,33 @@ PRODUCT_KEYWORD_ICONS: list[tuple[str, int | None, str]] = [
     ("meitu", None, "📸 "),
     ("linear", 6312267027809574565, "📋 "),
     ("hma", 5239963889004732575, "🛡️ "),
+    ("perplexity", None, "🔍 "),
+    ("zoom", None, "📹 "),
+    ("runway", None, "🎬 "),
+    ("krea", None, "🎨 "),
+    ("openart", None, "🖼️ "),
+    ("linkedin", None, "💼 "),
+    ("crunchyroll", None, "🍥 "),
+    ("deezer", None, "🎵 "),
+    ("shahid", None, "📺 "),
+    ("brainfm", None, "🎧 "),
+    ("brain.fm", None, "🎧 "),
+    ("warp", None, "💻 "),
+    ("xingtu", None, "📸 "),
+    ("render", None, "☁️ "),
+    ("apify", None, "🕷️ "),
+    ("v2ray", 5239963889004732575, "🛡️ "),
+    ("proxy", 5239963889004732575, "🌐 "),
+    ("glm", None, "🔑 "),
+    ("kimi", None, "🔑 "),
+    ("qwen", None, "🔑 "),
+    ("tencent", None, "🔑 "),
 ]
 
 
 def get_product_icon_and_prefix(product_name: str, use_fallback_emoji: bool = False) -> tuple[int | None, str]:
     """Trả về (custom_emoji_icon_id, text_prefix) cho từng sản phẩm."""
-    low = product_name.lower()
+    low = str(product_name or "").lower()
     for kw, icon_id, prefix in PRODUCT_KEYWORD_ICONS:
         if kw in low:
             if icon_id is not None and not use_fallback_emoji:
@@ -308,8 +349,8 @@ def get_product_icon_and_prefix(product_name: str, use_fallback_emoji: bool = Fa
 
 def detect_plan_group(product_name: str, category: str = "") -> str:
     """Ánh xạ mỗi sản phẩm về đúng Tên Thương Hiệu (Brand) trên Bảng Lưới 2-3 Cột."""
-    cat_low = (category or "").strip().lower()
-    name_low = (product_name or "").strip().lower()
+    cat_low = str(category or "").strip().lower()
+    name_low = str(product_name or "").strip().lower()
     low = f"{cat_low} {name_low}"
 
     if cat_low == "grok" or "grok" in name_low:
@@ -320,6 +361,8 @@ def detect_plan_group(product_name: str, category: str = "") -> str:
         return "Gemini"
     if "claude" in low:
         return "Claude"
+    if "perplexity" in low:
+        return "Perplexity"
     if "notion" in low:
         return "Notion"
     if "cursor" in low:
@@ -372,7 +415,7 @@ def detect_plan_group(product_name: str, category: str = "") -> str:
         return "Apple"
     if "minimax" in low:
         return "MiniMax"
-    if "nordvpn" in low:
+    if "nordvpn" in low or "nord vpn" in low:
         return "NordVPN"
     if "surfshark" in low:
         return "Surfshark"
@@ -380,10 +423,12 @@ def detect_plan_group(product_name: str, category: str = "") -> str:
         return "Proton"
     if "purevpn" in low:
         return "PureVPN"
-    if any(k in low for k in ("vpn", "kaspersky", "avira", "hma")):
+    if any(k in low for k in ("vpn", "kaspersky", "avira", "hma", "v2ray", "proxy")):
         return "VPN"
     if "udemy" in low:
         return "Udemy"
+    if "edx" in low:
+        return "edX"
     if "higgsfield" in low:
         return "Higgsfield"
     if "intercom" in low:
@@ -446,11 +491,37 @@ def detect_plan_group(product_name: str, category: str = "") -> str:
         return "iLovePDF"
     if "miro" in low:
         return "Miro"
-    if "edx" in low:
-        return "edX"
     if "supercut" in low:
         return "Supercut"
-    return (category or product_name.split()[0]).strip()
+    if "zoom" in low:
+        return "Zoom"
+    if "runway" in low:
+        return "Runway"
+    if "krea" in low:
+        return "Krea"
+    if "openart" in low:
+        return "OpenArt"
+    if "linkedin" in low:
+        return "LinkedIn"
+    if "crunchyroll" in low:
+        return "Crunchyroll"
+    if "deezer" in low:
+        return "Deezer"
+    if "shahid" in low:
+        return "Shahid"
+    if "brainfm" in low or "brain.fm" in low:
+        return "Brain.fm"
+    if "warp" in low:
+        return "Warp"
+    if "xingtu" in low:
+        return "Xingtu"
+    if "render" in low:
+        return "Render"
+    if "apify" in low:
+        return "Apify"
+    if cat_low == "api" or any(k in low for k in ("glm mix", "kimi mix", "qwen mix", "tencent cloud api", "muse wonder api")):
+        return "API Token"
+    return str(category or product_name.split()[0]).strip()
 
 
 def stock_badge(stock: int | None, in_stock: bool) -> str:

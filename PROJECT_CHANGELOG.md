@@ -5,6 +5,16 @@
 
 ---
 
+## [v2.9.7] - 2026-10-26: Kiểm Định Toàn Hệ Thống & Mở Rộng Bảng Lưới Thương Hiệu Lên 172 Sản Phẩm (`100%` Độ Phủ)
+
+### 🛍️ Mở Rộng Bảng Lưới Thương Hiệu (`prodseller_client.py`)
+- **Bổ sung 15 thương hiệu mới từ `@ProdSellerBot` (55 SP) & `@DanteHubBot` (117 SP độc quyền):**
+  - Thêm các nút thương hiệu mới vào `BRAND_GRID_ROWS`, `GROUP_EMOJI`, `PRODUCT_KEYWORD_ICONS` và `detect_plan_group`: `Perplexity`, `Zoom`, `Runway`, `Krea`, `OpenArt`, `LinkedIn`, `API Token` (GLM/Kimi/Qwen/Tencent/Muse), `Crunchyroll`, `Deezer`, `Shahid`, `Brain.fm`, `Warp`, `Xingtu`, `Render`, `Apify` và gộp `V2Ray` / `Proxy` vào nhóm `VPN`.
+  - Sửa thứ tự nhận diện `edX` trước `X Premium` để gói `edX Premium 12Months` hiển thị đúng trong nhóm `edX`, đạt độ phủ **100% (`172/172` sản phẩm)** trên Bảng Lưới Thương Hiệu.
+  - Chuẩn hóa ép kiểu `str(category or "")` trong `detect_plan_group()` và `get_product_icon_and_prefix()` để an toàn tuyệt đối với mọi kiểu dữ liệu trả về từ API.
+
+---
+
 ## [v2.9.6] - 2026-10-24: Bắt Buộc Tham Gia Kênh & Nhóm Trước Khi Mua/Nạp (`Force-Join Gate`) + Hiển Thị Tên Khách Hàng & Nhắn Tin Trực Tiếp 1 Chạm Qua Bot
 
 ### 🛡️ 1. Cổng Bắt Buộc Tham Gia Kênh & Nhóm Cộng Đồng Trước Khi Mua Hàng / Nạp Tiền (`bot.py`, `i18n.py`, `database.py`)
