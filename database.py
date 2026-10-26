@@ -520,49 +520,36 @@ class Database:
             self._lock_and_recover_unpaid_orders_7047310836()
 
     def _lock_and_recover_unpaid_orders_7047310836(self) -> None:
-        """Thu hồi & khóa 2 đơn hàng chưa thanh toán (#3 và #4) của khách 7047310836,
-        đồng thời đưa 2 link kích hoạt vào kho dự phòng nội bộ (local_stock) để bảo toàn vốn cho Admin."""
+        """Tạm khóa bảo hành 2 đơn hàng chưa thanh toán (#3 và #4) của khách 7047310836,
+        đồng thời gỡ bỏ 2 link đã kích hoạt khỏi local_stock để không xuất nhầm cho khách khác."""
         try:
-            if self.get_setting("revoked_unpaid_7047310836_v1", "") == "1":
+            if self.get_setting("cleanup_used_recovered_links_7047310836_v2", "") == "1":
                 return
             locked_msg = json.dumps(
-                ["🔒 Đã thu hồi link — Vui lòng nạp 101,000đ để mở khóa kích hoạt"],
+                ["🔒 Tạm khóa Bảo Hành — Vui lòng nạp 101,000đ/đơn để kích hoạt Bảo Hành Chính Hãng 18 Tháng"],
                 ensure_ascii=False,
             )
             with self._conn() as conn:
                 conn.execute(
                     """
-                    UPDATE orders
-                    SET status = 'locked_unpaid', delivered_keys = ?
-                    WHERE user_id = 7047310836 AND id IN (3, 4)
-                    """,
-                    (locked_msg,),
+                    DELETE FROM backup_sources
+                    WHERE source_type = 'local_stock'
+                      AND (source_name LIKE '%Thu Hồi%' OR stock_keys LIKE '%activation-market.shop%')
+                    """
                 )
                 conn.execute(
                     """
-                    UPDATE users
-                    SET balance = 0, points = 0, orders_count = 0, total_spent = 0
-                    WHERE telegram_id = 7047310836
-                      AND NOT EXISTS (
-                          SELECT 1 FROM deposits WHERE user_id = 7047310836 AND status = 'approved'
-                      )
-                    """
+                    UPDATE orders
+                    SET delivered_keys = ?
+                    WHERE user_id = 7047310836 AND id IN (3, 4) AND status = 'locked_unpaid'
+                    """,
+                    (locked_msg,),
                 )
-            self._users_cache.pop(7047310836, None)
-            recovered_links = [
-                "https://activation-market.shop/r/oQotH_9wuK9fnPztl4xEc6MdLnd9iadmy8-GMlK1FF1qZmUzWG425sKj5hw0OptCdkUw9wu3GQwK2eLn0wumzuo",
-                "https://activation-market.shop/r/ZqSDVqUa38Ya8sErW2SddC5jgBWALJB7ipz4q_m_NjBYND7d3KW0PW7PV9QhlowtNbh3MxfdTUBNq6O06Hpvpdw",
-            ]
-            self.add_or_append_local_backup_source(
-                product_id="6a31035939dc014325da2c66",
-                source_name="Kho Thu Hồi Đơn #3 & #4",
-                cost_vnd=33635,
-                new_keys=recovered_links,
-            )
-            self.set_setting("revoked_unpaid_7047310836_v1", "1")
-            logger.info("🔒 Đã khóa đơn #3 & #4 của khách 7047310836 và đưa 2 link vào Kho Thu Hồi!")
+            self._backup_sources_cache = None
+            self.set_setting("cleanup_used_recovered_links_7047310836_v2", "1")
+            logger.info("🧹 Đã gỡ 2 link đã kích hoạt khỏi local_stock và cập nhật trạng thái tạm khóa bảo hành đơn #3 & #4!")
         except Exception as exc:
-            logger.warning("Không thể thực thi khóa đơn 7047310836 tự động: %s", exc)
+            logger.warning("Không thể thực thi dọn dẹp local_stock 7047310836 tự động: %s", exc)
 
     def warm_all_caches(self) -> None:
         """Nạp toàn bộ bảng cấu hình, giá ghi đè, voucher và nguồn dự phòng vào RAM trong 1 kết nối duy nhất."""

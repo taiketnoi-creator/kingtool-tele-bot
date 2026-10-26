@@ -5,6 +5,24 @@
 
 ---
 
+## [v2.9.8] - 2026-10-26: Trò Chuyện Trực Tiếp 2 Chiều Thực Tế Trên Telegram (`Live 2-Way Chat Mirror`) & Gỡ Link Đã Kích Hoạt Khỏi `local_stock`
+
+### 💬 1. Hiển Thị Cuộc Trò Chuyện Trực Tiếp 2 Chiều Giữa Bot/Admin & Khách Hàng Ngay Trên Telegram (`bot.py`)
+- **Đồng bộ tin nhắn chiều đi (`Outgoing Chat Bubble — Bot ➡️ Khách hàng` trong `send_message_to_user_safe`):**
+  - Mỗi khi Bot hoặc Admin gửi tin nhắn trực tiếp tới khách hàng, hệ thống tự động hiển thị ngay bản sao bong bóng hội thoại thực tế (`📤 [CUỘC TRÒ CHUYỆN TRỰC TIẾP: BOT ➡️ KHÁCH HÀNG]`) trong khung chat Telegram của Admin (`8110826820`) kèm đầy đủ tên khách, ID, trạng thái gửi và các nút thao tác nhanh.
+- **Tự động chuyển tiếp mọi tin nhắn chiều đến (`Incoming Chat Bubble — Khách hàng ➡️ Bot` trong `forward_customer_chat_to_admins` & `handle_text_input`):**
+  - Loại bỏ việc bỏ qua tin nhắn tự do của khách (`if not awaiting: return`). Bất kỳ lúc nào khách hàng gõ tin nhắn văn bản hoặc gửi hình ảnh/biên lai/tệp đính kèm trực tiếp vào `@KingToolShop_bot` (kể cả khi không bấm nút `💬 Phản hồi lại Admin` trước), Bot đều tự động chuyển tiếp nguyên vẹn nội dung và hình ảnh tới Telegram của Admin (`📩 [CUỘC TRÒ CHUYỆN TRỰC TIẾP: KHÁCH HÀNG ➡️ BOT]`).
+- **Hỗ trợ Admin vuốt trả lời trực tiếp (`Swipe-to-Reply`) như cuộc trò chuyện bình thường:**
+  - Admin có thể **vuốt trả lời (Reply)** trực tiếp vào bất kỳ bong bóng tin nhắn nào có ID khách hàng ngay trên Telegram (không cần bấm nút trung gian) để gửi tin nhắn hoặc hình ảnh thẳng tới khách hàng đó.
+
+### 🛡️ 2. Gỡ Bỏ 2 Link Đã Kích Hoạt Khỏi Kho Nội Bộ (`local_stock`) & Chuyển Sang Mở Khóa Bảo Hành Đơn `#3` & `#4` (`database.py`, `bot.py`)
+- **Xóa triệt để nguồn `Kho Thu Hồi Đơn #3 & #4` khỏi `telebot.backup_sources`:**
+  - Do khách hàng `Vũ` (`7047310836`) đã bấm vào và kích hoạt 2 link `Gemini Pro 18Months (link)` của đơn `#3` và `#4`, hệ thống đã xóa 2 link này khỏi `local_stock` để tuyệt đối không xuất nhầm link đã qua sử dụng cho khách hàng khác.
+- **Cập nhật luồng mở khóa đơn `#3` & `#4` (`unlock_ord:`):**
+  - Khi khách `7047310836` nạp tiền thanh toán (`101,000đ`/đơn), hệ thống khấu trừ số dư và kích hoạt **Bảo Hành Chính Hãng 18 Tháng** cho đúng 2 link khách đã nhận mà không rút từ `local_stock` hay mua mới từ ProdSeller.
+
+---
+
 ## [v2.9.7] - 2026-10-26: Kiểm Định Toàn Hệ Thống & Mở Rộng Bảng Lưới Thương Hiệu Lên 172 Sản Phẩm (`100%` Độ Phủ)
 
 ### 🛍️ Mở Rộng Bảng Lưới Thương Hiệu (`prodseller_client.py`)
