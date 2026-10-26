@@ -3049,6 +3049,50 @@ async def keep_alive_ping_loop() -> None:
             pass
 
 
+async def setup_bot_commands_menu(bot_token: str) -> None:
+    """Đăng ký menu gợi ý lệnh (khi gõ dấu `/` hoặc bấm nút Menu) riêng biệt cho Khách hàng và cho Admin."""
+    if not bot_token:
+        return
+    import httpx
+
+    user_commands = [
+        {"command": "start", "description": "🏠 Trang chủ & Menu chính KingTool Shop"},
+        {"command": "shop", "description": "🛒 Xem Danh mục Sản phẩm & Mua hàng"},
+        {"command": "nap", "description": "💳 Nạp tiền tự động qua VietQR 24/7"},
+        {"command": "donhang", "description": "📦 Xem Lịch sử đơn hàng & Bảo hành"},
+        {"command": "taikhoan", "description": "👤 Xem Hồ sơ, Số dư ví & Hạng VIP"},
+        {"command": "hotro", "description": "💬 Nhắn tin trực tiếp với CSKH Shop"},
+        {"command": "cancel", "description": "❌ Hủy thao tác đang nhập dở"},
+    ]
+    admin_commands = [
+        {"command": "admin", "description": "⚙️ Bảng Điều Khiển Quản Trị (Admin Panel)"},
+        {"command": "inbox", "description": "📥 Hộp Thư Chat Khách Hàng (Chờ trả lời)"},
+        {"command": "khach", "description": "👥 Danh sách & Tìm kiếm Khách hàng"},
+        {"command": "duyetnap", "description": "⏳ Xem & Duyệt đơn nạp tiền đang chờ"},
+        {"command": "don", "description": "📦 Xem 10 Đơn hàng gần nhất của Shop"},
+        {"command": "kho", "description": "🔑 Quản lý Kho Key & Link dự phòng"},
+        {"command": "closechat", "description": "🚪 Đóng phiên chat khách hàng đang mở"},
+        {"command": "start", "description": "🏠 Giao diện Menu Chính (Khách hàng)"},
+        {"command": "shop", "description": "🛒 Xem Danh mục Sản phẩm trên Shop"},
+        {"command": "cancel", "description": "❌ Hủy thao tác đang nhập dở"},
+    ]
+    api_url = f"https://api.telegram.org/bot{bot_token}/setMyCommands"
+    try:
+        async with httpx.AsyncClient(timeout=12.0) as hc:
+            # 1. Cài đặt gợi ý lệnh `/` cho toàn bộ Khách hàng (Default + All Private Chats)
+            await hc.post(api_url, json={"commands": user_commands, "scope": {"type": "default"}})
+            await hc.post(api_url, json={"commands": user_commands, "scope": {"type": "all_private_chats"}})
+            # 2. Cài đặt gợi ý lệnh `/` chuyên biệt cho từng Admin (Ghi đè theo chat_id của Admin)
+            for adm_id in ADMIN_IDS:
+                await hc.post(
+                    api_url,
+                    json={"commands": admin_commands, "scope": {"type": "chat", "chat_id": int(adm_id)}},
+                )
+        logger.info("✅ Đã đồng bộ Menu gợi ý lệnh `/` riêng cho Khách hàng và Admin (%s)!", list(ADMIN_IDS))
+    except Exception as exc:
+        logger.warning("Không thể đồng bộ menu gợi ý lệnh `/`: %s", exc)
+
+
 # ==================== MAIN RUNNER ====================
 async def run_bot() -> None:
     global BOT_USERNAME_CACHE, _BOT_CLIENT_REF
@@ -3066,6 +3110,7 @@ async def run_bot() -> None:
     BOT_USERNAME_CACHE = me.username or "KingToolShop_bot"
     logger.info("🚀 Bot Reseller @%s (ID: %s) đang hoạt động (Chế độ tiền tệ: VNĐ)!", BOT_USERNAME_CACHE, me.id)
 
+    asyncio.create_task(setup_bot_commands_menu(bot_token))
     asyncio.create_task(ps_client.sync_products(force=True))
     asyncio.create_task(poll_products_sync_loop(client))
     asyncio.create_task(poll_pending_activations_loop(client))
@@ -4552,12 +4597,121 @@ async def run_bot() -> None:
         if event.out:
             return
         if text.startswith("/"):
-            if text.lower() == "/cancel":
-                USER_AWAITING.pop(event.sender_id, None)
-                u, lang = await get_user_info(event)
+            cmd = text.split()[0].lower().split("@")[0]
+            uid_cmd = int(event.sender_id)
+            if cmd in ("/start", "/admin", "/addbalance", "/broadcast"):
+                return
+            USER_AWAITING.pop(uid_cmd, None)
+            u_cmd, lang_cmd = await get_user_info(event)
+
+            # --- Lệnh gợi ý `/` dành riêng cho Admin ---
+            if is_admin(uid_cmd):
+                if cmd == "/inbox":
+                    await render_admin_chat_inbox(event, page=0)
+                    return
+                if cmd == "/khach":
+                    await render_admin_user_list(event, page=0)
+                    return
+                if cmd == "/duyetnap":
+                    await render_admin_pending_deposits(event)
+                    return
+                if cmd == "/don":
+                    await render_admin_recent_orders(event)
+                    return
+                if cmd == "/kho":
+                    await render_admin_local_keys_inventory(event)
+                    return
+                if cmd == "/closechat":
+                    await event.respond(
+                        "🚪 **Đã đóng phiên trò chuyện riêng với khách hàng.**",
+                        buttons=[
+                            [Button.inline("📥 Hộp Thư Chat Khách Hàng", b"adm:inbox:0", style="success")],
+                            [Button.inline("« Về Bảng Admin", b"adm:home")],
+                        ],
+                    )
+                    return
+
+            # --- Lệnh gợi ý `/` dành cho Khách hàng (& Admin dùng chung) ---
+            if cmd == "/shop":
+                await render_products_menu(event)
+                return
+            if cmd == "/nap":
+                await render_deposit_menu(event)
+                return
+            if cmd == "/donhang":
+                orders = db.get_user_orders(uid_cmd, limit=8)
+                rows_ord: list[list[Any]] = []
+                if not orders:
+                    txt_ord = t(lang_cmd, "orders_empty")
+                else:
+                    lines_ord = [t(lang_cmd, "orders_history_title")]
+                    warr_btns: list[Any] = []
+                    for o in orders:
+                        clean_keys = format_order_keys_preview(o.get("delivered_keys", ""))
+                        lines_ord.append(
+                            f"• `#{o['id']}` | **{o['product_name']}** (x{o['quantity']}) — **{vnd_int(o['retail_price']):,}đ** [{o['status']}]\n"
+                            f"  🔑 `{clean_keys}`"
+                        )
+                        if o.get("status") == "locked_unpaid":
+                            warr_btns.append(
+                                Button.inline(
+                                    f"🔓 Mở khóa #{o['id']} ({vnd_int(o['retail_price']):,}đ)",
+                                    f"unlock_ord:{o['id']}".encode(),
+                                    style="success",
+                                )
+                            )
+                        elif len(warr_btns) < 6:
+                            warr_btns.append(
+                                Button.inline(
+                                    t(lang_cmd, "warr_btn", order_id=o["id"]),
+                                    f"warr:ask:{o['id']}".encode(),
+                                )
+                            )
+                    for i in range(0, len(warr_btns), 2):
+                        rows_ord.append(warr_btns[i : i + 2])
+                    txt_ord = "\n".join(lines_ord)
+                rows_ord.append([Button.inline(t(lang_cmd, "btn_back"), b"menu:home")])
+                await event.respond(txt_ord, buttons=rows_ord)
+                return
+            if cmd == "/taikhoan":
+                pts = int(u_cmd.get("points", 0) or 0)
+                tier = u_cmd.get("tier", "bronze")
+                disc_pct = TIER_DISCOUNTS.get(tier.lower(), 0)
+                rows_prof = [
+                    [Button.inline(t(lang_cmd, "my_orders_btn"), b"prof:orders")],
+                    [Button.inline(t(lang_cmd, "referral_btn"), b"prof:ref")],
+                    [Button.inline(t(lang_cmd, "deposit_now_btn"), b"menu:deposit", style="success")],
+                    [Button.inline(t(lang_cmd, "btn_back"), b"menu:home")],
+                ]
                 await event.respond(
-                    t(lang, "main_menu_title", balance=vnd_int(u["balance"]), points=u["points"]),
-                    buttons=main_menu_buttons(lang, event.sender_id),
+                    t(
+                        lang_cmd,
+                        "profile_title",
+                        uid=uid_cmd,
+                        username=u_cmd["username"],
+                        tier=tier.upper(),
+                        disc_pct=disc_pct,
+                        balance=vnd_int(u_cmd["balance"]),
+                        points=pts,
+                        orders=u_cmd["orders_count"],
+                        spent=vnd_int(u_cmd["total_spent"]),
+                        joined=u_cmd["joined_at"][:10],
+                    ),
+                    buttons=rows_prof,
+                )
+                return
+            if cmd == "/hotro":
+                USER_AWAITING[uid_cmd] = {"type": "user_reply_admin"}
+                await event.respond(
+                    "💬 **NHẮN TIN TRỰC TIẾP VỚI CSKH KINGTOOL SHOP**\n\n"
+                    "Hãy nhập nội dung câu hỏi hoặc gửi hình ảnh vào đây, `@KingToolShop_bot` sẽ chuyển thẳng tới bộ phận CSKH ngay lập tức (hoặc gõ `/cancel` để hủy):",
+                    buttons=[[Button.inline(t(lang_cmd, "btn_back"), b"menu:home")]],
+                )
+                return
+            if cmd == "/cancel":
+                await event.respond(
+                    t(lang_cmd, "main_menu_title", balance=vnd_int(u_cmd["balance"]), points=u_cmd["points"]),
+                    buttons=main_menu_buttons(lang_cmd, uid_cmd),
                 )
             return
 

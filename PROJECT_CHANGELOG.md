@@ -5,6 +5,29 @@
 
 ---
 
+## [v3.0.2] - 2026-10-26: Menu Gợi Ý Lệnh Khi Gõ `/` Riêng Biệt Cho Admin Và Khách Hàng (`Scoped Bot Commands`)
+
+### ⚡ 1. Gợi Ý Lệnh Nhanh Khi Gõ `/` Hoặc Bấm Nút `☰ Menu` Trên Telegram (`setup_bot_commands_menu` trong `bot.py`)
+- **Menu gợi ý `/` dành cho Khách hàng (`scope = default` & `all_private_chats`):**
+  - `/start` — 🏠 Trang chủ & Menu chính KingTool Shop
+  - `/shop` — 🛒 Xem Danh mục Sản phẩm & Mua hàng
+  - `/nap` — 💳 Nạp tiền tự động qua VietQR 24/7
+  - `/donhang` — 📦 Xem Lịch sử đơn hàng & Bảo hành
+  - `/taikhoan` — 👤 Xem Hồ sơ, Số dư ví & Hạng VIP
+  - `/hotro` — 💬 Nhắn tin trực tiếp với CSKH Shop
+  - `/cancel` — ❌ Hủy thao tác đang nhập dở
+- **Menu gợi ý `/` dành riêng cho Admin (`scope = chat` theo `ADMIN_IDS` — chỉ Admin mới nhìn thấy):**
+  - `/admin` — ⚙️ Bảng Điều Khiển Quản Trị (Admin Panel)
+  - `/inbox` — 📥 Hộp Thư Chat Khách Hàng (Chờ trả lời)
+  - `/khach` — 👥 Danh sách & Tìm kiếm Khách hàng
+  - `/duyetnap` — ⏳ Xem & Duyệt đơn nạp tiền đang chờ
+  - `/don` — 📦 Xem 10 Đơn hàng gần nhất của Shop
+  - `/kho` — 🔑 Quản lý Kho Key & Link dự phòng
+  - `/closechat` — 🚪 Đóng phiên chat khách hàng đang mở
+  - `/start`, `/shop`, `/cancel`
+
+---
+
 ## [v3.0.1] - 2026-10-26: Hộp Thư Quản Lý Chat Đa Khách Hàng Chống Rối (`adm:inbox`) & Giới Hạn Cảnh Báo Vốn 1 Lần/Ngày
 
 ### 📥 1. Quản Lý Đa Khách Hàng Nhắn Tin Cùng Lúc Không Bị Rối (`database.py`, `bot.py`)
