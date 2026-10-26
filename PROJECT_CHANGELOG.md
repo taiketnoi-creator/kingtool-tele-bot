@@ -5,6 +5,25 @@
 
 ---
 
+## [v2.9.9] - 2026-10-26: Lưu Lịch Sử Tin Nhắn Trò Chuyện (`telebot.chat_messages`), Tách Sang Cuộc Trò Chuyện Cá Nhân Riêng (`@TaiArt`) & Chặn Thông Báo Đơn Mồi Với Admin
+
+### 💬 1. Lưu Lịch Sử Tin Nhắn Trò Chuyện (`telebot.chat_messages`) & Tách Cuộc Trò Chuyện Riêng Bên Ngoài `@KingToolShop_bot` (`database.py`, `bot.py`)
+- **Bảng dữ liệu `telebot.chat_messages` (`database.py`):**
+  - Thêm `chat_messages` vào `_TABLE_NAME_RE` (tuân thủ nghiêm ngặt Schema `telebot`), tự động lưu toàn bộ tin nhắn chiều đi (`admin`/`bot`) và chiều đến (`customer`) kèm thời gian thực (`add_chat_message`, `get_chat_history`).
+- **Hiển thị đầy đủ Thông tin & Lịch sử trò chuyện (`format_customer_chat_history_block` trong `bot.py`):**
+  - Khi Admin mở **Hồ sơ khách hàng (`adm:uinfo:<uid>`)** hoặc bấm **Lịch sử & Nhắn tin (`adm:msg:<uid>`)**, hệ thống hiển thị toàn bộ lịch sử tin nhắn đã gửi và nhận theo thứ tự thời gian (`📜 LỊCH SỬ TIN NHẮN TRÒ CHUYỆN`).
+- **Tách hẳn cuộc trò chuyện sang cửa sổ Chat Cá Nhân 1-1 riêng biệt với Admin (`@TaiArt`, không qua `@KingToolShop_bot`):**
+  - Mọi tin nhắn gửi tới khách hàng và menu Hỗ trợ đều gắn nút **`💬 Mở Cuộc Trò Chuyện Riêng Với Admin (@TaiArt)`** (`get_personal_admin_chat_url` kèm nội dung điền sẵn tên & ID khách). Khi khách bấm vào, Telegram mở ngay một **cửa sổ chat cá nhân 1-1 hoàn toàn mới và tách biệt khỏi `@KingToolShop_bot`**.
+  - Khi khách nhắn vào Bot, hệ thống tự động `forward_messages` bản gốc của khách để Admin chạm 1 lần là mở thẳng cửa sổ chat cá nhân riêng với khách.
+
+### 🔕 2. Ẩn Thông Báo Chuông Của Đơn Mồi (`Social Proof`) Đối Với Admin — Chỉ Báo Chuông Khi Có Khách Mua Thật (`bot.py`)
+- **Đăng Đơn Mồi ở chế độ Im Lặng (`silent=True` trong `_send_channel_post_with_banner` & `post_simulated_social_proof`):**
+  - Các bài đăng Đơn Mồi (`⚡ ĐƠN HÀNG TỰ ĐỘNG #... HOÀN TẤT`) trên kênh `@KingToolShopOfficial` vẫn hiển thị bình thường trên kênh để khách hàng nhìn thấy sự sôi động, nhưng sử dụng cờ `silent=True` (`disable_notification=True`) để **tuyệt đối không hiện thông báo đẩy / không báo chuông làm phiền trang Telegram của Admin**.
+  - Gỡ bỏ lệnh tự động bắn kèm Đơn Mồi khi Admin bấm đăng bài Spotlight thủ công (`adm:post_spotlight`).
+  - Chỉ khi có **khách hàng mua hàng thật** (`execute_purchase` / API), Bot mới gửi thông báo trực tiếp có chuông báo (`🎉 ĐƠN HÀNG MỚI #...`) về cho Admin.
+
+---
+
 ## [v2.9.8] - 2026-10-26: Trò Chuyện Trực Tiếp 2 Chiều Thực Tế Trên Telegram (`Live 2-Way Chat Mirror`) & Gỡ Link Đã Kích Hoạt Khỏi `local_stock`
 
 ### 💬 1. Hiển Thị Cuộc Trò Chuyện Trực Tiếp 2 Chiều Giữa Bot/Admin & Khách Hàng Ngay Trên Telegram (`bot.py`)

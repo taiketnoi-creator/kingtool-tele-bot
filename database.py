@@ -64,6 +64,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "deposit_reminder_enabled": "1",     # Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút (1=Bật, 0=Tắt)
     "dante_base_url": "https://dantehub.shop/api/public/v1",  # URL API Nguồn 2 (@DanteHubBot)
     "dante_api_key": "",                 # API Key đối tác @DanteHubBot (dh_live_...)
+    "personal_admin_username": "TaiArt", # Username Telegram cá nhân của Admin để mở cuộc trò chuyện 1-1 tách biệt khỏi Bot
 }
 
 TIER_DISCOUNTS: dict[str, int] = {
@@ -73,7 +74,7 @@ TIER_DISCOUNTS: dict[str, int] = {
 }
 
 _TABLE_NAME_RE = re.compile(
-    r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders|vouchers|voucher_usages|api_keys|backup_sources)\b(?![.'\"_])"
+    r"(?<![.'\"_])\b(settings|users|product_overrides|deposits|orders|vouchers|voucher_usages|api_keys|backup_sources|chat_messages)\b(?![.'\"_])"
 )
 
 
@@ -338,6 +339,14 @@ class Database:
                         active INTEGER NOT NULL DEFAULT 1,
                         created_at TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id BIGSERIAL PRIMARY KEY,
+                        user_id BIGINT NOT NULL,
+                        sender_role TEXT NOT NULL DEFAULT 'admin',
+                        content TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
                     """
                 )
                 if DEFAULT_SETTINGS:
@@ -488,6 +497,14 @@ class Database:
                         active INTEGER NOT NULL DEFAULT 1,
                         created_at TEXT NOT NULL
                     );
+
+                    CREATE TABLE IF NOT EXISTS chat_messages (
+                        id INTEGER PRIMARY KEY AUTOINCREMENT,
+                        user_id INTEGER NOT NULL,
+                        sender_role TEXT NOT NULL DEFAULT 'admin',
+                        content TEXT NOT NULL DEFAULT '',
+                        created_at TEXT NOT NULL
+                    );
                     """
                 )
                 try:
@@ -523,7 +540,7 @@ class Database:
         """Tạm khóa bảo hành 2 đơn hàng chưa thanh toán (#3 và #4) của khách 7047310836,
         đồng thời gỡ bỏ 2 link đã kích hoạt khỏi local_stock để không xuất nhầm cho khách khác."""
         try:
-            if self.get_setting("cleanup_used_recovered_links_7047310836_v2", "") == "1":
+            if self.get_setting("cleanup_used_recovered_links_7047310836_v3", "") == "1":
                 return
             locked_msg = json.dumps(
                 ["🔒 Tạm khóa Bảo Hành — Vui lòng nạp 101,000đ/đơn để kích hoạt Bảo Hành Chính Hãng 18 Tháng"],
@@ -545,9 +562,20 @@ class Database:
                     """,
                     (locked_msg,),
                 )
+            existing_hist = self.get_chat_history(7047310836, limit=1)
+            if not existing_hist:
+                self.add_chat_message(
+                    user_id=7047310836,
+                    sender_role="admin",
+                    content=(
+                        "🔔 THÔNG BÁO KÍCH HOẠT BẢO HÀNH & THANH TOÁN ĐƠN HÀNG (#3 & #4)\n"
+                        "Hệ thống ghi nhận bạn đã nhận và kích hoạt 02 gói Gemini Pro 18Months (link) (Đơn #3 & #4 — 101,000đ/đơn, tổng 202,000đ) khi số dư 0đ. "
+                        "Hiện 2 đơn đang tạm khóa Bảo Hành, vui lòng nạp tiền thanh toán để kích hoạt Bảo Hành Chính Hãng 18 Tháng (1 đổi 1)."
+                    ),
+                )
             self._backup_sources_cache = None
-            self.set_setting("cleanup_used_recovered_links_7047310836_v2", "1")
-            logger.info("🧹 Đã gỡ 2 link đã kích hoạt khỏi local_stock và cập nhật trạng thái tạm khóa bảo hành đơn #3 & #4!")
+            self.set_setting("cleanup_used_recovered_links_7047310836_v3", "1")
+            logger.info("🧹 Đã gỡ 2 link đã kích hoạt khỏi local_stock và cập nhật lịch sử chat đơn #3 & #4!")
         except Exception as exc:
             logger.warning("Không thể thực thi dọn dẹp local_stock 7047310836 tự động: %s", exc)
 
@@ -2280,3 +2308,38 @@ class Database:
                 "total_deposited": round(float(d_row["dep"]), 2),
                 "pending_deposits_count": int(p_row["pcnt"]),
             }
+
+    # --- Customer Chat History (telebot.chat_messages) ---
+    def add_chat_message(self, user_id: int, sender_role: str, content: str, created_at: str | None = None) -> int:
+        """Lưu lịch sử tin nhắn trò chuyện giữa Admin/Bot và Khách hàng."""
+        ts = created_at or now_str()
+        clean_content = (content or "").strip()
+        if not clean_content:
+            return 0
+        with self._conn() as conn:
+            cur = conn.execute(
+                """
+                INSERT INTO chat_messages (user_id, sender_role, content, created_at)
+                VALUES (?, ?, ?, ?)
+                RETURNING id
+                """,
+                (int(user_id), str(sender_role), clean_content, ts),
+            )
+            row = cur.fetchone()
+            return int(row["id"]) if row else 0
+
+    def get_chat_history(self, user_id: int, limit: int = 12) -> list[dict[str, Any]]:
+        """Lấy danh sách lịch sử tin nhắn trò chuyện của 1 khách hàng theo thứ tự thời gian (cũ -> mới)."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT * FROM chat_messages
+                WHERE user_id = ?
+                ORDER BY id DESC
+                LIMIT ?
+                """,
+                (int(user_id), max(1, int(limit))),
+            ).fetchall()
+            items = [dict(r) for r in rows]
+            items.reverse()
+            return items

@@ -203,16 +203,43 @@ def format_admin_user_line(
     return f"👤 Tên khách: {clickable_name} | 🆔 ID: `{uid}`\n🏷️ Username: {uname_display}"
 
 
+def get_personal_admin_chat_url(customer_uid: int, customer_name: str = "") -> str:
+    """Tạo đường dẫn mở cuộc trò chuyện 1-1 tách biệt hoàn toàn khỏi @KingToolShop_bot trực tiếp tới Telegram cá nhân của Admin (@TaiArt)."""
+    import urllib.parse
+
+    adm_personal = db.get_setting("personal_admin_username", "TaiArt").lstrip("@").strip() or "TaiArt"
+    clean_name = (customer_name or f"Khách #{customer_uid}").strip()
+    prefill = f"Xin chào Admin, mình là {clean_name} (ID: {customer_uid}) cần hỗ trợ đơn hàng tại KingTool Shop!"
+    return f"https://t.me/{adm_personal}?text={urllib.parse.quote(prefill)}"
+
+
+def format_customer_chat_history_block(target_uid: int, limit: int = 8) -> str:
+    """Hiển thị lịch sử tin nhắn trò chuyện (cũ -> mới) giữa Admin/Bot và Khách hàng."""
+    history = db.get_chat_history(target_uid, limit=limit)
+    if not history:
+        return "📜 **LỊCH SỬ TIN NHẮN TRÒ CHUYỆN:**\n  *(Chưa có lịch sử tin nhắn nào)*"
+    lines = [f"📜 **LỊCH SỬ TIN NHẮN TRÒ CHUYỆN ({len(history)} tin gần nhất):**"]
+    for item in history:
+        ts_short = str(item.get("created_at", ""))[5:16]  # MM-DD HH:MM
+        role = str(item.get("sender_role", "admin")).lower()
+        role_lbl = "📤 **Admin/Bot**" if role in ("admin", "bot") else "📥 **Khách hàng**"
+        body = str(item.get("content", "")).strip()
+        if len(body) > 260:
+            body = body[:257] + "..."
+        lines.append(f"• `[{ts_short}]` {role_lbl}: {body}")
+    return "\n".join(lines)
+
+
 def build_admin_user_buttons(uid: int, include_profile: bool = True) -> list[Any]:
-    """Tạo hàng nút bấm giúp Admin nhắn tin trực tiếp qua Bot, mở khung chat Telegram cá nhân hoặc xem hồ sơ khách hàng."""
+    """Tạo hàng nút bấm giúp Admin mở cuộc trò chuyện cá nhân riêng biệt, xem lịch sử chat hoặc xem hồ sơ khách hàng."""
     u = db._users_cache.get(uid, (0.0, {}))[1] or db.get_or_create_user(uid)
     safe_name, _, _ = get_user_display_parts(uid, u)
     short_name = safe_name[:14]
     raw_u = str(u.get("username") or "").strip().lstrip("@")
     direct_url = f"https://t.me/{raw_u}" if (raw_u and db.is_valid_tg_username(raw_u)) else f"tg://user?id={uid}"
     row: list[Any] = [
-        Button.inline(f"💬 Nhắn {short_name}", f"adm:msg:{uid}".encode(), style="success"),
-        Button.url("🔗 Mở Chat Riêng", direct_url),
+        Button.url(f"🔗 Mở Chat Riêng ({short_name})", direct_url),
+        Button.inline(f"💬 Lịch sử & Nhắn", f"adm:msg:{uid}".encode(), style="success"),
     ]
     if include_profile:
         row.append(Button.inline("👤 Hồ sơ", f"adm:uinfo:{uid}".encode(), style="primary"))
@@ -228,9 +255,26 @@ async def send_message_to_user_safe(
     inline_kb_fallback: list[list[dict[str, str]]] | None = None,
     media: Any = None,
     mirror_to_admin: bool = True,
+    record_content: str | None = None,
 ) -> bool:
-    """Gửi tin nhắn tới khách hàng qua Telethon (fallback sang HTTP Bot API nếu chưa có access_hash),
-    đồng thời tự động hiển thị bản sao cuộc trò chuyện thực tế (Outgoing Chat Bubble) trên Telegram của Admin."""
+    """Gửi tin nhắn tới khách hàng, lưu vào bảng lịch sử `telebot.chat_messages`,
+    và đính kèm nút mở cuộc trò chuyện 1-1 riêng biệt với Telegram cá nhân của Admin (@TaiArt)."""
+    tu = db._users_cache.get(target_uid, (0.0, {}))[1] or db.get_or_create_user(target_uid)
+    safe_name, _, _ = get_user_display_parts(target_uid, tu)
+    personal_chat_url = get_personal_admin_chat_url(target_uid, safe_name)
+    adm_personal = db.get_setting("personal_admin_username", "TaiArt").lstrip("@").strip() or "TaiArt"
+
+    if buttons is None:
+        buttons = [
+            [Button.url(f"💬 Mở Trò Chuyện Riêng Với Admin (@{adm_personal})", personal_chat_url)],
+            [Button.inline("✍️ Nhắn phản hồi nhanh tại đây", b"usr:reply_adm", style="success")],
+        ]
+    if inline_kb_fallback is None:
+        inline_kb_fallback = [
+            [{"text": f"💬 Mở Trò Chuyện Riêng Với Admin (@{adm_personal})", "url": personal_chat_url}],
+            [{"text": "✍️ Nhắn phản hồi nhanh tại đây", "callback_data": "usr:reply_adm"}],
+        ]
+
     sent_ok = False
     try:
         await client.send_message(target_uid, text_md, buttons=buttons, file=media)
@@ -255,15 +299,23 @@ async def send_message_to_user_safe(
             except Exception:
                 sent_ok = False
 
+    if sent_ok and not is_admin(target_uid):
+        clean_log = (record_content or text_md).replace("**", "").strip()
+        try:
+            db.add_chat_message(target_uid, "admin", clean_log)
+        except Exception:
+            pass
+
     if sent_ok and mirror_to_admin and not is_admin(target_uid):
-        tu = db._users_cache.get(target_uid, (0.0, {}))[1] or db.get_or_create_user(target_uid)
+        history_block = format_customer_chat_history_block(target_uid, limit=8)
         mirror_md = (
-            f"📤 **[CUỘC TRÒ CHUYỆN TRỰC TIẾP: BOT ➡️ KHÁCH HÀNG]**\n"
+            f"✅ **ĐÃ GỬI TIN NHẮN & CẬP NHẬT LỊCH SỬ TRÒ CHUYỆN**\n\n"
             f"{format_admin_user_line(target_uid, tu)}\n"
+            f"🔗 *Khách đã nhận được nút mở **Cuộc trò chuyện cá nhân riêng biệt** trực tiếp tới `@{adm_personal}` (không qua Bot)!*\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"{text_md}\n"
+            f"{history_block}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"✅ *Đã hiển thị trên Telegram của khách `{target_uid}` — Bạn có thể **vuốt trả lời (Reply)** trực tiếp tin nhắn này để nhắn tiếp!*"
+            f"💡 *Bấm **🔗 Mở Chat Riêng** bên dưới để mở sang cửa sổ chat cá nhân 1-1 với khách, hoặc vuốt Reply tại đây:*"
         )
         adm_buttons = [
             build_admin_user_buttons(target_uid),
@@ -286,25 +338,39 @@ async def forward_customer_chat_to_admins(
     lang: str,
     text: str,
 ) -> None:
-    """Chuyển tiếp mọi tin nhắn / hình ảnh khách hàng nhắn cho Bot tới khung chat Telegram của Admin theo thời gian thực."""
+    """Lưu lịch sử tin nhắn của khách, chuyển tiếp bản gốc (forwardMessage) để Admin bấm mở khung chat riêng 1-1,
+    đồng thời điều hướng khách sang cửa sổ chat cá nhân riêng biệt của Admin (@TaiArt)."""
     msg_body = text.strip() if text and text.strip() else "*(Khách hàng gửi hình ảnh / tệp đính kèm)*"
+    try:
+        db.add_chat_message(uid, "customer", msg_body)
+    except Exception:
+        pass
+
+    safe_name, _, _ = get_user_display_parts(uid, u)
+    personal_chat_url = get_personal_admin_chat_url(uid, safe_name)
+    adm_personal = db.get_setting("personal_admin_username", "TaiArt").lstrip("@").strip() or "TaiArt"
+    history_block = format_customer_chat_history_block(uid, limit=8)
+
     adm_text = (
-        f"📩 **[CUỘC TRÒ CHUYỆN TRỰC TIẾP: KHÁCH HÀNG ➡️ BOT]**\n"
+        f"📩 **KHÁCH HÀNG NHẮN TIN — THÔNG TIN & LỊCH SỬ TRÒ CHUYỆN**\n\n"
         f"{format_admin_user_line(uid, u)}\n"
         f"💵 Số dư ví: **{vnd_int(u.get('balance', 0)):,}đ** | 📦 Đã mua: **{u.get('orders_count', 0)} đơn**\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💬 **Nội dung khách nhắn:**\n{msg_body}\n"
+        f"💬 **Tin nhắn mới nhất từ khách:**\n{msg_body}\n"
         f"━━━━━━━━━━━━━━━━━━\n"
-        f"💡 *Vuốt trả lời (**Reply**) trực tiếp vào tin nhắn này hoặc bấm nút bên dưới để nhắn lại cho khách!*"
+        f"{history_block}\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"👉 *Bấm vào tên khách ở tin nhắn Chuyển tiếp (Forwarded) phía trên hoặc bấm **🔗 Mở Chat Riêng** để tách sang cửa sổ trò chuyện 1-1 riêng biệt!*"
     )
     adm_btns = [
-        [
-            Button.inline("💬 Trả lời lại khách", f"adm:msg:{uid}".encode(), style="success"),
-            Button.inline("👤 Hồ sơ khách", f"adm:uinfo:{uid}".encode(), style="primary"),
-        ],
-        build_admin_user_buttons(uid, include_profile=False),
+        build_admin_user_buttons(uid),
     ]
     for adm_id in ADMIN_IDS:
+        try:
+            # Chuyển tiếp (Forward) tin nhắn gốc của khách để Telegram của Admin mở được cửa sổ chat 1-1 riêng biệt
+            await client.forward_messages(adm_id, event.message)
+        except Exception:
+            pass
         try:
             await client.send_message(
                 adm_id,
@@ -318,9 +384,13 @@ async def forward_customer_chat_to_admins(
             except Exception:
                 pass
     await event.respond(
-        "💬 **Tin nhắn của bạn đã được chuyển trực tiếp tới Admin!**\n"
-        "⚡ Admin đã nhận được và sẽ phản hồi bạn ngay tại khung chat này *(Bạn có thể nhắn tiếp bất kỳ lúc nào như một cuộc trò chuyện bình thường)*.",
-        buttons=[[Button.inline(t(lang, "btn_back"), b"menu:home")]],
+        f"✅ **Đã gửi tin nhắn của bạn tới Admin!**\n\n"
+        f"💬 Để tách sang **cuộc trò chuyện cá nhân riêng biệt** với Admin (gửi ảnh, trao đổi trực tiếp không qua Bot), "
+        f"bạn hãy bấm nút **💬 Mở Trò Chuyện Riêng Với Admin (@{adm_personal})** bên dưới nhé:",
+        buttons=[
+            [Button.url(f"💬 Mở Trò Chuyện Riêng Với Admin (@{adm_personal})", personal_chat_url)],
+            [Button.inline(t(lang, "btn_back"), b"menu:home")],
+        ],
     )
 
 
@@ -1087,15 +1157,16 @@ async def _send_channel_post_with_banner(
     text: str,
     buttons: list[list[Any]],
     banner_io: io.BytesIO | None = None,
+    silent: bool = True,
 ) -> Any:
-    """Gửi bài đăng kèm ảnh Banner HD (tự động cắt gọn caption <= 1000 ký tự và fallback sang text nếu lỗi ảnh)."""
+    """Gửi bài đăng kèm ảnh Banner HD (mặc định silent=True để không bật chuông làm phiền Admin đối với bài tự động/đơn mồi)."""
     if banner_io is not None:
         try:
             caption = text if len(text) <= 1000 else (text[:995].rsplit("\n", 1)[0] + "\n...")
-            return await client.send_message(channel_name, caption, file=banner_io, buttons=buttons)
+            return await client.send_message(channel_name, caption, file=banner_io, buttons=buttons, silent=silent)
         except Exception as exc:
             logger.debug("Fallback gửi text lên kênh (lỗi gửi kèm ảnh %s): %s", channel_name, exc)
-    return await client.send_message(channel_name, text, buttons=buttons)
+    return await client.send_message(channel_name, text, buttons=buttons, silent=silent)
 
 
 async def post_restock_notification(client: TelegramClient, restocked_items: list[dict[str, Any]]) -> None:
@@ -1157,8 +1228,10 @@ async def post_order_social_proof(
     qty: int,
     total_vnd: int,
     product_id: str = "",
+    silent: bool = False,
 ) -> int | None:
-    """Tự động đăng thông báo khách mua hàng thành công kèm ảnh Biên Lai HD lên kênh @KingToolShopOfficial."""
+    """Tự động đăng thông báo khách mua hàng thành công kèm ảnh Biên Lai HD lên kênh @KingToolShopOfficial.
+    Khi là đơn mồi (silent=True), chỉ hiển thị tĩnh trên kênh cho khách xem chứ tuyệt đối không báo chuông làm phiền Admin."""
     try:
         ch_name = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@").strip()
         if not ch_name:
@@ -1203,7 +1276,7 @@ async def post_order_social_proof(
             )
         except Exception:
             pass
-        msg = await _send_channel_post_with_banner(client, ch_name, text, rows, banner_io)
+        msg = await _send_channel_post_with_banner(client, ch_name, text, rows, banner_io, silent=silent)
         return msg.id if msg else None
     except Exception as exc:
         logger.debug("Không thể đăng social proof lên kênh: %s", exc)
@@ -1211,7 +1284,8 @@ async def post_order_social_proof(
 
 
 async def post_simulated_social_proof(client: TelegramClient) -> int | None:
-    """Tự động đăng thông báo đơn hàng hoàn tất (Social Proof) định kỳ giúp kênh luôn sôi động, uy tín."""
+    """Tự động đăng thông báo đơn hàng hoàn tất (Social Proof) ở chế độ im lặng (silent=True):
+    Khách vào kênh vẫn thấy đơn hàng sôi động nhưng tuyệt đối không hiện thông báo làm phiền Admin."""
     global _LAST_SIM_SOCIAL_MSG_ID
     try:
         if str(db.get_setting("auto_social_proof_enabled", "1") or "0").strip() != "1":
@@ -1256,6 +1330,7 @@ async def post_simulated_social_proof(client: TelegramClient) -> int | None:
             qty=qty,
             total_vnd=unit_vnd * qty,
             product_id=pid,
+            silent=True,
         )
         if new_mid:
             _LAST_SIM_SOCIAL_MSG_ID = new_mid
@@ -2414,11 +2489,12 @@ async def render_admin_user_detail(
     raw_u = str(found.get("username") or "").strip().lstrip("@")
     has_valid_u = bool(raw_u and db.is_valid_tg_username(raw_u))
     direct_url = f"https://t.me/{raw_u}" if has_valid_u else f"tg://user?id={f_uid}"
+    history_block = format_customer_chat_history_block(f_uid, limit=8)
 
     info_txt = (
-        f"👤 **HỒ SƠ CHI TIẾT KHÁCH HÀNG**\n\n"
+        f"👤 **HỒ SƠ CHI TIẾT & LỊCH SỬ TRÒ CHUYỆN KHÁCH HÀNG**\n\n"
         f"📛 Tên hiển thị: {clickable_name}\n"
-        f"🔗 Liên kết chat riêng: **[👉 Bấm vào đây để mở khung chat cá nhân]({direct_url})**\n"
+        f"🔗 Mở cửa sổ chat 1-1 riêng: **[👉 Bấm vào đây để tách sang cuộc trò chuyện cá nhân]({direct_url})**\n"
         f"🆔 Telegram ID: `{f_uid}`\n"
         f"🏷️ Username: {uname_disp}\n"
         f"📣 Kênh `@{ch_name}`: **{ch_badge}** | 💬 Nhóm `@{grp_name}`: **{grp_badge}**\n"
@@ -2427,11 +2503,13 @@ async def render_admin_user_detail(
         f"⭐ Điểm thưởng: **{found.get('points', 0)}**\n"
         f"📦 Tổng đơn đã mua: **{found.get('orders_count', 0)}** (Chi tiêu: **{vnd_int(found.get('total_spent', 0)):,}đ**)\n"
         f"📅 Ngày tham gia: `{found.get('joined_at', '')}`\n\n"
-        f"🛍️ **Đơn hàng gần nhất:**\n{ord_summary}"
+        f"🛍️ **Đơn hàng gần nhất:**\n{ord_summary}\n\n"
+        f"━━━━━━━━━━━━━━━━━━\n"
+        f"{history_block}"
     )
     rows: list[list[Any]] = [
-        [Button.inline(f"💬 Nhắn tin qua Bot cho {safe_name[:18]}", f"adm:msg:{f_uid}".encode(), style="success")],
-        [Button.url(f"🔗 Mở Khung Chat Cá Nhân Telegram ({safe_name[:14]})", direct_url)],
+        [Button.url(f"🔗 Mở Cuộc Trò Chuyện Cá Nhân Riêng ({safe_name[:14]})", direct_url)],
+        [Button.inline(f"💬 Gửi Tin Nhắn & Xem Lịch Sử ({safe_name[:14]})", f"adm:msg:{f_uid}".encode(), style="success")],
         [Button.inline("💵 Cộng / Trừ số dư khách này", f"adm:addbal_u:{f_uid}".encode(), style="primary")],
         [
             Button.inline("👥 Danh sách Khách hàng", b"adm:userlist:0"),
@@ -3554,10 +3632,13 @@ async def run_bot() -> None:
             await event.answer()
             admin_user = db.get_setting("support_admin", "KingToolShopSupport").lstrip("@")
             channel_user = db.get_setting("support_channel", "KingToolShopOfficial").lstrip("@")
+            adm_personal = db.get_setting("personal_admin_username", "TaiArt").lstrip("@").strip() or "TaiArt"
+            safe_name, _, _ = get_user_display_parts(uid, u)
+            personal_url = get_personal_admin_chat_url(uid, safe_name)
             rows = [
-                [Button.inline("💬 Nhắn tin trực tiếp với Admin ngay trên Bot", b"usr:reply_adm", style="success")],
-                [Button.url(f"🆘 @{admin_user}", f"https://t.me/{admin_user}")],
-                [Button.url(f"📣 @{channel_user}", f"https://t.me/{channel_user}")],
+                [Button.url(f"💬 Mở Cuộc Trò Chuyện Riêng Với Admin (@{adm_personal})", personal_url)],
+                [Button.url(f"🆘 Nhóm CSKH @{admin_user}", f"https://t.me/{admin_user}")],
+                [Button.url(f"📣 Kênh @{channel_user}", f"https://t.me/{channel_user}")],
                 [Button.inline(t(lang, "btn_back"), b"menu:home")],
             ]
             await send_or_edit(event, t(lang, "support_title", admin=admin_user, channel=channel_user), buttons=rows)
@@ -3739,6 +3820,8 @@ async def run_bot() -> None:
                 safe_name, _, _ = get_user_display_parts(target_uid, tu)
                 raw_u = str(tu.get("username") or "").strip().lstrip("@")
                 direct_url = f"https://t.me/{raw_u}" if (raw_u and db.is_valid_tg_username(raw_u)) else f"tg://user?id={target_uid}"
+                adm_personal = db.get_setting("personal_admin_username", "TaiArt").lstrip("@").strip() or "TaiArt"
+                history_block = format_customer_chat_history_block(target_uid, limit=10)
                 USER_AWAITING[uid] = {
                     "type": "admin_direct_msg",
                     "target_uid": target_uid,
@@ -3746,14 +3829,17 @@ async def run_bot() -> None:
                 await send_or_edit(
                     event,
                     (
-                        f"💬 **NHẮN TIN TRỰC TIẾP TỚI KHÁCH HÀNG**\n\n"
+                        f"💬 **THÔNG TIN, LỊCH SỬ TRÒ CHUYỆN & NHẮN TIN KHÁCH HÀNG**\n\n"
                         f"{format_admin_user_line(target_uid, tu)}\n"
-                        f"🔗 Mở khung chat riêng: **[👉 Bấm vào đây để mở Telegram cá nhân của khách]({direct_url})**\n\n"
-                        "✍️ **Hoặc nhập nội dung tin nhắn tại đây để gửi thẳng cho khách qua Bot** "
-                        "*(Khách sẽ nhận được ngay kèm nút `💬 Phản hồi lại Admin`, luôn gửi được 100% kể cả khi khách không có `@username`)*:"
+                        f"💵 Số dư ví: **{vnd_int(tu.get('balance', 0)):,}đ** | 📦 Đã mua: **{tu.get('orders_count', 0)} đơn**\n"
+                        f"🔗 Mở cửa sổ chat 1-1 riêng: **[👉 Bấm vào đây để tách sang cuộc trò chuyện cá nhân]({direct_url})**\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"{history_block}\n"
+                        f"━━━━━━━━━━━━━━━━━━\n"
+                        f"✍️ **Nhập nội dung tin nhắn tại đây để gửi cho khách** *(Khách sẽ nhận được ngay kèm nút `💬 Mở Trò Chuyện Riêng Với Admin @{adm_personal}` để tách sang chat 1-1 riêng biệt ngoài Bot)*:"
                     ),
                     buttons=[
-                        [Button.url(f"🔗 Mở Khung Chat Cá Nhân ({safe_name[:14]})", direct_url)],
+                        [Button.url(f"🔗 Mở Cuộc Trò Chuyện Cá Nhân Riêng ({safe_name[:14]})", direct_url)],
                         [Button.inline("« Quay lại Hồ sơ khách", f"adm:uinfo:{target_uid}".encode())],
                     ],
                     force_new=True,
@@ -3825,12 +3911,11 @@ async def run_bot() -> None:
                 return
 
             if data == "adm:post_spotlight":
-                await event.answer("⏳ Đang đăng bài Spotlight Sản Phẩm Hot + Đơn Mồi lên @KingToolShopOfficial...")
+                await event.answer("⏳ Đang đăng bài Spotlight Sản Phẩm Hot lên @KingToolShopOfficial...")
                 try:
                     sp_mid = await post_spotlight_to_channel(client)
-                    await post_simulated_social_proof(client)
                     await event.respond(
-                        f"🔥 Đã đăng bài **Spotlight Sản Phẩm Hot** (Msg `#{sp_mid}`) & **Thông báo Đơn hàng hoàn tất** lên `@KingToolShopOfficial` thành công!",
+                        f"🔥 Đã đăng bài **Spotlight Sản Phẩm Hot** (Msg `#{sp_mid}`) lên `@KingToolShopOfficial` thành công!",
                         buttons=[
                             [
                                 Button.inline("« Về Thư mục Kênh & Marketing", b"adm:dir:marketing"),
@@ -4314,11 +4399,10 @@ async def run_bot() -> None:
                             client,
                             target_uid,
                             text_md=msg_md,
-                            buttons=[[Button.inline("💬 Phản hồi lại Admin", b"usr:reply_adm", style="success")]],
                             html_fallback=msg_html,
-                            inline_kb_fallback=[[{"text": "💬 Phản hồi lại Admin", "callback_data": "usr:reply_adm"}]],
                             media=getattr(event, "media", None),
                             mirror_to_admin=True,
+                            record_content=body_txt,
                         )
                         if not sent_ok:
                             await event.respond(
@@ -4465,11 +4549,10 @@ async def run_bot() -> None:
                 client,
                 target_uid,
                 text_md=msg_md,
-                buttons=[[Button.inline("💬 Phản hồi lại Admin", b"usr:reply_adm", style="success")]],
                 html_fallback=msg_html,
-                inline_kb_fallback=[[{"text": "💬 Phản hồi lại Admin", "callback_data": "usr:reply_adm"}]],
                 media=getattr(event, "media", None),
                 mirror_to_admin=True,
+                record_content=body_txt,
             )
             if not sent_ok:
                 await event.respond(
@@ -4611,11 +4694,10 @@ async def run_bot() -> None:
                 client,
                 target_uid,
                 text_md=msg_md,
-                buttons=[[Button.inline("💬 Phản hồi lại Admin", b"usr:reply_adm", style="success")]],
                 html_fallback=msg_html,
-                inline_kb_fallback=[[{"text": "💬 Phản hồi lại Admin", "callback_data": "usr:reply_adm"}]],
                 media=getattr(event, "media", None),
                 mirror_to_admin=True,
+                record_content=body_txt,
             )
             if not sent_ok:
                 await event.respond(
