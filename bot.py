@@ -3814,9 +3814,10 @@ async def run_bot() -> None:
                 return
 
             if data.startswith("adm:msg:"):
-                await event.answer("💬 Đã mở phiên trò chuyện riêng (@KingToolShop_bot ↔ Khách)")
+                await event.answer("💬 Đã mở khung nhập tin nhắn với khách hàng!")
                 target_uid = int(data.split(":")[2])
                 tu = db.get_or_create_user(target_uid)
+                safe_name, _, _ = get_user_display_parts(target_uid, tu)
                 orders_block = format_customer_orders_summary_block(target_uid, limit=5)
                 history_block = format_customer_chat_history_block(target_uid, limit=10)
                 USER_AWAITING[uid] = {
@@ -3846,6 +3847,19 @@ async def run_bot() -> None:
                     ],
                     force_new=True,
                 )
+                try:
+                    await client.send_message(
+                        uid,
+                        f"✍️ **ĐANG CHAT VỚI KHÁCH: {safe_name} (ID: `{target_uid}`)**\n"
+                        f"👉 *Gõ nội dung tin nhắn hoặc gửi ảnh vào ô nhập liệu bên dưới để `@KingToolShop_bot` gửi ngay cho khách:*",
+                        buttons=Button.force_reply(
+                            single_use=True,
+                            selective=True,
+                            placeholder=f"Nhập tin nhắn gửi {safe_name[:18]}...",
+                        ),
+                    )
+                except Exception:
+                    pass
                 return
 
             if data.startswith("adm:addbal_u:"):
