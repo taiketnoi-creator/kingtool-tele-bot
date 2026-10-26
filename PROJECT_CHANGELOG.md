@@ -5,7 +5,23 @@
 
 ---
 
-## [v2.9.9] - 2026-10-26: Lưu Lịch Sử Tin Nhắn Trò Chuyện (`telebot.chat_messages`), Tách Sang Cuộc Trò Chuyện Cá Nhân Riêng (`@TaiArt`) & Chặn Thông Báo Đơn Mồi Với Admin
+## [v3.0.0] - 2026-10-26: Phiên Trò Chuyện Riêng Ẩn Danh 100% (`@KingToolShop_bot ↔ Khách Hàng`) & Gỡ Bỏ Hoàn Toàn Tài Khoản Cá Nhân Admin
+
+### 🛡️ 1. Bảo Mật 100% Danh Tính Admin — `@KingToolShop_bot` Đóng Vai Shop Trò Chuyện Trực Tiếp Với Khách (`bot.py`, `database.py`)
+- **Xóa bỏ hoàn toàn liên kết cá nhân của Admin (`@TaiArt` / `personal_admin_username`):**
+  - Loại bỏ hàm `get_personal_admin_chat_url`, cấu hình `personal_admin_username` và mọi liên kết `tg://user?id=...` dẫn tới tài khoản cá nhân của Admin để khách hàng **chỉ tương tác trực tiếp với `@KingToolShop_bot`** (tuyệt đối không lộ danh tính cá nhân của Admin).
+  - Cập nhật lại ngay lập tức nút bấm trên tin nhắn thực tế (`Msg #210`) đã gửi cho khách `Vũ Minh` (`7047310836`) thành **`💬 Nhắn tin phản hồi cho Shop`**.
+- **Tách Phiên Trò Chuyện Riêng (`💬 PHIÊN TRÒ CHUYỆN RIÊNG: @KingToolShop_bot ↔ KHÁCH HÀNG`) độc lập với Menu `/admin` (`bot.py`):**
+  - Khi Admin bấm **`💬 Mở Phiên Chat`** (`adm:msg:<uid>`), hệ thống mở một cửa sổ tin nhắn riêng biệt hiển thị đầy đủ 3 phần:
+    1. **Thông tin khách hàng** (Tên, ID, Số dư ví, Hạng VIP).
+    2. **Danh sách đơn hàng của khách (`format_customer_orders_summary_block`)** (Ví dụ: Đơn `#4`, `#3` kèm trạng thái mở khóa Bảo hành).
+    3. **Lịch sử tin nhắn trò chuyện (`format_customer_chat_history_block`)** giữa `🤖 @KingToolShop_bot` và `👤 Khách hàng`.
+- **Chế độ Chat 2 Chiều Liên Tục (`Continuous Session` — không thoát sau 1 tin nhắn):**
+  - Giữ trạng thái `USER_AWAITING[uid] = {"type": "admin_direct_msg", "target_uid": target_uid}` xuyên suốt phiên chat để Admin gõ nhiều tin nhắn hoặc gửi nhiều hình ảnh liên tiếp dưới danh nghĩa `@KingToolShop_bot` cho tới khi bấm nút **`🚪 Đóng phiên trò chuyện này`** (`adm:close_chat`).
+
+---
+
+## [v2.9.9] - 2026-10-26: Lưu Lịch Sử Tin Nhắn Trò Chuyện (`telebot.chat_messages`) & Chặn Thông Báo Đơn Mồi Với Admin
 
 ### 💬 1. Lưu Lịch Sử Tin Nhắn Trò Chuyện (`telebot.chat_messages`) & Tách Cuộc Trò Chuyện Riêng Bên Ngoài `@KingToolShop_bot` (`database.py`, `bot.py`)
 - **Bảng dữ liệu `telebot.chat_messages` (`database.py`):**

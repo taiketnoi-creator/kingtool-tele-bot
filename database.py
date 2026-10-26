@@ -64,7 +64,6 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "deposit_reminder_enabled": "1",     # Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút (1=Bật, 0=Tắt)
     "dante_base_url": "https://dantehub.shop/api/public/v1",  # URL API Nguồn 2 (@DanteHubBot)
     "dante_api_key": "",                 # API Key đối tác @DanteHubBot (dh_live_...)
-    "personal_admin_username": "TaiArt", # Username Telegram cá nhân của Admin để mở cuộc trò chuyện 1-1 tách biệt khỏi Bot
 }
 
 TIER_DISCOUNTS: dict[str, int] = {
