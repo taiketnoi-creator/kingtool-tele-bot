@@ -214,7 +214,7 @@ def format_customer_orders_summary_block(target_uid: int, limit: int = 5) -> str
         w_unlocked = int(o.get("warranty_unlocked", 0) or 0) == 1
         w_tag = "🔓 Đã mở BH" if w_unlocked else "🔒 Chưa mở BH"
         lines.append(
-            f"• Đơn `#{o['id']}` | **{o['product_name']}** (x{o['quantity']}) — **{int(o['total_price']):,}đ** | {w_tag} (`{ts_short}`)"
+            f"• Đơn `#{o['id']}` | **{o['product_name']}** (x{o['quantity']}) — **{vnd_int(o.get('retail_price', 0)):,}đ** | {w_tag} (`{ts_short}`)"
         )
     return "\n".join(lines)
 
