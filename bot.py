@@ -249,6 +249,38 @@ def build_admin_user_buttons(uid: int, include_profile: bool = True) -> list[Any
     return row
 
 
+# Lưu message_id thẻ hội thoại gần nhất của từng khách (adm_id, customer_uid) -> message_id
+# Giúp mỗi khách chỉ hiển thị 1 thẻ hội thoại duy nhất trên màn hình Admin (tự xóa thẻ cũ của khách đó khi có tin mới, không bị trôi/rối khi nhiều khách cùng nhắn)
+_LAST_ADMIN_CHAT_CARD_MSG_ID: dict[tuple[int, int], int] = {}
+
+
+async def _replace_admin_customer_chat_card(
+    client: TelegramClient,
+    adm_id: int,
+    customer_uid: int,
+    text_md: str,
+    buttons: list[list[Any]],
+    media: Any = None,
+) -> None:
+    old_mid = _LAST_ADMIN_CHAT_CARD_MSG_ID.get((adm_id, customer_uid))
+    if old_mid and media is None:
+        try:
+            await client.delete_messages(adm_id, [old_mid])
+        except Exception:
+            pass
+    try:
+        sent_msg = await client.send_message(adm_id, text_md, buttons=buttons, file=media)
+        if sent_msg and getattr(sent_msg, "id", None):
+            _LAST_ADMIN_CHAT_CARD_MSG_ID[(adm_id, customer_uid)] = int(sent_msg.id)
+    except Exception:
+        try:
+            sent_msg = await client.send_message(adm_id, text_md, buttons=buttons)
+            if sent_msg and getattr(sent_msg, "id", None):
+                _LAST_ADMIN_CHAT_CARD_MSG_ID[(adm_id, customer_uid)] = int(sent_msg.id)
+        except Exception:
+            pass
+
+
 async def send_message_to_user_safe(
     client: TelegramClient,
     target_uid: int,
@@ -261,8 +293,9 @@ async def send_message_to_user_safe(
     record_content: str | None = None,
 ) -> bool:
     """Gửi tin nhắn tới khách hàng dưới danh nghĩa @KingToolShop_bot (ẩn danh 100% tài khoản cá nhân Admin),
-    lưu vào bảng lịch sử `telebot.chat_messages`, và hiển thị khung Phiên Trò Chuyện Riêng cho Admin."""
+    lưu vào bảng lịch sử `telebot.chat_messages`, và cập nhật thẻ Phiên Trò Chuyện Riêng gọn gàng cho Admin."""
     tu = db._users_cache.get(target_uid, (0.0, {}))[1] or db.get_or_create_user(target_uid)
+    safe_name, _, _ = get_user_display_parts(target_uid, tu)
 
     if buttons is None:
         buttons = [
@@ -307,9 +340,11 @@ async def send_message_to_user_safe(
     if sent_ok and mirror_to_admin and not is_admin(target_uid):
         orders_block = format_customer_orders_summary_block(target_uid, limit=5)
         history_block = format_customer_chat_history_block(target_uid, limit=10)
+        unread_cnt = db.get_unread_chat_count()
+        inbox_lbl = f"📥 Hộp Thư Chat ({unread_cnt} khách chờ trả lời)" if unread_cnt > 0 else "📥 Hộp Thư Tất Cả Khách Chat"
         mirror_md = (
-            f"💬 **PHIÊN TRÒ CHUYỆN: @KingToolShop_bot ↔ KHÁCH HÀNG**\n"
-            f"✅ *(@KingToolShop_bot vừa gửi tin nhắn thành công tới khách — Ẩn danh 100% Admin)*\n\n"
+            f"💬 **PHIÊN CHAT RIÊNG: @KingToolShop_bot ↔ {safe_name.upper()} (`{target_uid}`)**\n"
+            f"✅ *(@KingToolShop_bot vừa gửi tin nhắn thành công — Đã tự thu gọn thẻ cũ của khách này)*\n\n"
             f"{format_admin_user_line(target_uid, tu)}\n"
             f"💵 Số dư ví: **{vnd_int(tu.get('balance', 0)):,}đ** | 📦 Đã mua: **{tu.get('orders_count', 0)} đơn**\n"
             f"━━━━━━━━━━━━━━━━━━\n"
@@ -317,20 +352,20 @@ async def send_message_to_user_safe(
             f"━━━━━━━━━━━━━━━━━━\n"
             f"{history_block}\n"
             f"━━━━━━━━━━━━━━━━━━\n"
-            f"🟢 **ĐANG MỞ PHIÊN CHAT LIÊN TỤC:** Gõ tiếp tin nhắn hoặc gửi ảnh ngay bên dưới để `@KingToolShop_bot` gửi tiếp cho khách (hoặc bấm **🚪 Đóng phiên trò chuyện** khi xong):"
+            f"🟢 **ĐANG KHÓA PHIÊN CHAT Ở KHÁCH NÀY (`{safe_name}`):** Gõ tiếp tin nhắn hoặc gửi ảnh ngay bên dưới để `@KingToolShop_bot` gửi tiếp cho khách (hoặc bấm **📥 Hộp Thư Chat** để đổi sang khách khác):"
         )
         adm_buttons = [
             [
                 Button.inline("🔄 Làm mới Lịch sử", f"adm:msg:{target_uid}".encode(), style="primary"),
-                Button.inline("👤 Hồ sơ khách", f"adm:uinfo:{target_uid}".encode()),
+                Button.inline("👤 Hồ sơ & Đơn", f"adm:uinfo:{target_uid}".encode()),
             ],
-            [Button.inline("🚪 Đóng phiên trò chuyện này", b"adm:close_chat", style="danger")],
+            [
+                Button.inline(inbox_lbl, b"adm:inbox:0", style="danger" if unread_cnt > 0 else "primary"),
+                Button.inline("🚪 Đóng phiên chat", b"adm:close_chat", style="danger"),
+            ],
         ]
         for adm_id in ADMIN_IDS:
-            try:
-                await client.send_message(adm_id, mirror_md, buttons=adm_buttons, file=media)
-            except Exception:
-                pass
+            await _replace_admin_customer_chat_card(client, adm_id, target_uid, mirror_md, adm_buttons, media=media)
 
     return sent_ok
 
@@ -343,45 +378,68 @@ async def forward_customer_chat_to_admins(
     lang: str,
     text: str,
 ) -> None:
-    """Lưu lịch sử tin nhắn của khách và hiển thị Phiên Trò Chuyện (@KingToolShop_bot ↔ Khách) kèm thông tin đơn hàng + lịch sử chat cho Admin."""
+    """Lưu lịch sử tin nhắn của khách và hiển thị Thẻ Hội Thoại Riêng từng khách (tự thay thế thẻ cũ của cùng khách để không bị rối khi nhiều khách nhắn)."""
     msg_body = text.strip() if text and text.strip() else "*(Khách hàng gửi hình ảnh / tệp đính kèm)*"
     try:
         db.add_chat_message(uid, "customer", msg_body)
     except Exception:
         pass
 
+    safe_name, _, _ = get_user_display_parts(uid, u)
     orders_block = format_customer_orders_summary_block(uid, limit=5)
     history_block = format_customer_chat_history_block(uid, limit=10)
+    unread_cnt = db.get_unread_chat_count()
+    inbox_lbl = f"📥 Hộp Thư Chat ({unread_cnt} khách chờ trả lời)" if unread_cnt > 0 else "📥 Hộp Thư Tất Cả Khách Chat"
 
-    adm_text = (
-        f"📩 **KHÁCH HÀNG NHẮN TIN TỚI @KingToolShop_bot**\n\n"
-        f"{format_admin_user_line(uid, u)}\n"
-        f"💵 Số dư ví: **{vnd_int(u.get('balance', 0)):,}đ** | 📦 Đã mua: **{u.get('orders_count', 0)} đơn**\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"💬 **Tin nhắn mới từ khách:**\n{msg_body}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"{orders_block}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"{history_block}\n"
-        f"━━━━━━━━━━━━━━━━━━\n"
-        f"👉 *Bấm nút **💬 Mở Phiên Chat** bên dưới (hoặc vuốt Reply tin nhắn này) để `@KingToolShop_bot` đóng vai Shop trả lời khách!*"
-    )
-    adm_btns = [
-        build_admin_user_buttons(uid),
-    ]
     for adm_id in ADMIN_IDS:
-        try:
-            await client.send_message(
-                adm_id,
-                adm_text,
-                buttons=adm_btns,
-                file=getattr(event, "media", None),
+        cur_await = USER_AWAITING.get(adm_id) or {}
+        active_target = int(cur_await.get("target_uid", 0) or 0) if cur_await.get("type") == "admin_direct_msg" else 0
+        if active_target == uid:
+            session_note = (
+                f"🟢 **Bạn đang mở sẵn phiên chat với khách `{safe_name}` này:** Chỉ cần gõ tin nhắn ở ô bên dưới là gửi thẳng cho khách!"
             )
-        except Exception:
-            try:
-                await client.send_message(adm_id, adm_text, buttons=adm_btns)
-            except Exception:
-                pass
+        elif active_target > 0:
+            session_note = (
+                f"⚠️ **CHỐNG NHẦM KHÁCH:** Ô gõ phím của bạn đang khóa ở khách khác (`ID: {active_target}`).\n"
+                f"👉 Muốn trả lời khách **{safe_name}** này, hãy bấm nút **💬 Chuyển sang Chat với {safe_name[:12]}** bên dưới (hoặc vuốt Reply trực tiếp vào thẻ này)!"
+            )
+        else:
+            session_note = (
+                f"👉 *Bấm nút **💬 Mở Phiên Chat ({safe_name[:12]})** bên dưới (hoặc vuốt Reply trực tiếp vào thẻ này) để `@KingToolShop_bot` trả lời khách!*"
+            )
+
+        adm_text = (
+            f"🔴 **[KHÁCH HÀNG PHẢN HỒI — CHỜ TRẢ LỜI]**\n"
+            f"💬 **KHÁCH: {safe_name.upper()} (ID: `{uid}`)**\n\n"
+            f"{format_admin_user_line(uid, u)}\n"
+            f"💵 Số dư ví: **{vnd_int(u.get('balance', 0)):,}đ** | 📦 Đã mua: **{u.get('orders_count', 0)} đơn**\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"📩 **Tin nhắn mới vừa gửi tới Shop:**\n> {msg_body}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{orders_block}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{history_block}\n"
+            f"━━━━━━━━━━━━━━━━━━\n"
+            f"{session_note}"
+        )
+        adm_btns = [
+            [
+                Button.inline(f"💬 Chuyển sang Chat ({safe_name[:12]})", f"adm:msg:{uid}".encode(), style="success"),
+                Button.inline("👤 Hồ sơ & Đơn", f"adm:uinfo:{uid}".encode(), style="primary"),
+            ],
+            [
+                Button.inline(inbox_lbl, b"adm:inbox:0", style="danger" if unread_cnt > 0 else "primary"),
+            ],
+        ]
+        await _replace_admin_customer_chat_card(
+            client,
+            adm_id,
+            uid,
+            adm_text,
+            adm_btns,
+            media=getattr(event, "media", None),
+        )
+
     await event.respond(
         "✅ **@KingToolShop_bot đã nhận được tin nhắn của bạn và chuyển tới bộ phận CSKH!**\n\n"
         "💬 Shop sẽ phản hồi bạn trực tiếp ngay tại khung chat này. Bạn có thể nhắn thêm thông tin hoặc gửi ảnh trực tiếp tại đây nhé:",
@@ -1103,7 +1161,7 @@ async def execute_purchase(
                 total_vnd=total_retail_vnd,
             )
         )
-        asyncio.create_task(check_and_alert_low_prodseller_balance(client))
+        asyncio.create_task(check_and_alert_low_prodseller_balance(client, force_on_purchase=True))
 
 
 # ==================== CẢNH BÁO VỐN, PHỄU KHÁCH HÀNG & TỰ ĐỘNG ĐĂNG KÊNH @KingToolShopOfficial ====================
@@ -1116,28 +1174,48 @@ _LAST_SPOTLIGHT_MSG_ID: int = 0
 _REMINDED_DEPOSIT_IDS: set[int] = set()
 
 
-async def check_and_alert_low_prodseller_balance(client: TelegramClient) -> None:
-    """Kiểm tra số dư vốn trên @ProdSellerBot và cảnh báo Admin nếu tụt dưới ngưỡng cài đặt."""
+async def check_and_alert_low_prodseller_balance(
+    client: TelegramClient,
+    force_on_purchase: bool = False,
+) -> None:
+    """Kiểm tra số dư vốn trên @ProdSellerBot và cảnh báo Admin nếu tụt dưới ngưỡng cài đặt.
+    - Định kỳ nền (force_on_purchase=False): Tối đa 1 lần / ngày (lưu vào Supabase telebot.settings tránh báo lại khi restart).
+    - Khi có khách hàng mua hàng thật (force_on_purchase=True): Báo ngay lúc khách mua nếu số dư vốn đang dưới ngưỡng.
+    """
     global _LAST_LOW_BAL_ALERT_TS
     try:
         threshold = float(db.get_setting("low_balance_threshold_usd", "5.0") or 0.0)
         if threshold <= 0:
             return
         now_ts = time.time()
-        if now_ts - _LAST_LOW_BAL_ALERT_TS < 14400.0:  # Cooldown 4 giờ tránh spam
-            return
+        today_vn = datetime.now(timezone(timedelta(hours=7))).strftime("%Y-%m-%d")
+        last_alert_date = str(db.get_setting("last_low_bal_alert_date", "") or "").strip()
+
+        if not force_on_purchase:
+            # Định kỳ nền: chỉ báo tối đa 1 lần / ngày
+            if last_alert_date == today_vn or (now_ts - _LAST_LOW_BAL_ALERT_TS < 86400.0):
+                return
+
         b_info = await ps_client.get_balance()
         ps_usd = float(b_info.get("balance", 0.0))
         if ps_usd <= threshold:
             _LAST_LOW_BAL_ALERT_TS = now_ts
+            if last_alert_date != today_vn:
+                db.set_setting("last_low_bal_alert_date", today_vn)
             rate = float(db.get_setting("vnd_rate", "25500") or 25500.0)
             ps_vnd = int(round(ps_usd * rate))
+            trigger_lbl = (
+                "⚡ *(Cảnh báo ngay khi vừa có khách mua hàng)*\n"
+                if force_on_purchase
+                else "📅 *(Báo cáo định kỳ 1 lần/ngày)*\n"
+            )
             for adm_id in ADMIN_IDS:
                 try:
                     await client.send_message(
                         adm_id,
                         (
-                            "🚨 **CẢNH BÁO SỐ DƯ VỐN @ProdSellerBot SẮP HẾT!**\n\n"
+                            "🚨 **CẢNH BÁO SỐ DƯ VỐN @ProdSellerBot SẮP HẾT!**\n"
+                            f"{trigger_lbl}\n"
                             f"🏦 Số dư vốn hiện tại: **`${ps_usd:.2f}`** (~**{ps_vnd:,}đ**)\n"
                             f"⚠️ Ngưỡng cảnh báo: **`${threshold:.2f}`**\n\n"
                             "👉 Vui lòng nạp thêm USDT vào `@ProdSellerBot` sớm để không bị gián đoạn khi khách mua hàng tự động!"
@@ -2049,6 +2127,12 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     min_profit_pct = float(settings.get("min_profit_percent", "150.0") or 150.0)
     active_src_cnt, total_backup_keys = db.get_backup_summary_stats()
     pending_cnt = stats.get("pending_deposits_count", 0)
+    unread_chat_cnt = db.get_unread_chat_count()
+    inbox_btn_txt = (
+        f"📥 Hộp Thư Chat Khách ({unread_chat_cnt} chờ trả lời)"
+        if unread_chat_cnt > 0
+        else "📥 Hộp Thư Chat Khách Hàng"
+    )
 
     text = (
         "⚙️ **BẢNG ĐIỀU KHIỂN ADMIN (RESELLER PANEL)**\n\n"
@@ -2056,6 +2140,7 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
         f"🏦 **Vốn Nguồn 2 (@DanteHubBot):** `{dante_bal_str}`\n"
         f"📦 **Kho dự phòng đa nguồn:** **{active_src_cnt} nguồn** đang bật (**{total_backup_keys} key** sẵn sàng)\n"
         f"👥 Khách hàng: **{stats['users_count']}** | 📦 Tổng đơn: **{stats['orders_count']}** | ⏳ Chờ duyệt nạp: **{pending_cnt}**\n"
+        f"💬 Hộp thư khách hàng: **{unread_chat_cnt} khách đang chờ trả lời**\n"
         f"💰 Doanh thu: **{vnd_int(stats['total_revenue']):,}đ** | 📉 Giá vốn: **{vnd_int(stats['total_cost']):,}đ**\n"
         f"💵 **Lợi nhuận ròng: +{vnd_int(stats['total_profit']):,}đ**\n"
         f"🛡️ *Định giá: Chuẩn `+{settings['markup_percent']}%` | Sàn lãi `>={min_profit_pct:g}%` | Tỷ giá `$1 = {int(rate):,}đ`*\n\n"
@@ -2063,6 +2148,13 @@ async def render_admin_home(event: Any, force_new: bool = False) -> None:
     )
 
     rows = [
+        [
+            Button.inline(
+                inbox_btn_txt,
+                b"adm:inbox:0",
+                style="danger" if unread_chat_cnt > 0 else "success",
+            ),
+        ],
         [
             Button.inline(
                 f"⏳ Đơn nạp chờ duyệt ({pending_cnt})",
@@ -2273,17 +2365,28 @@ async def render_admin_folder(event: Any, folder: str, force_new: bool = False) 
 
     else:  # "users"
         stats = db.get_summary_stats()
+        unread_chat_cnt = db.get_unread_chat_count()
         adm_user = settings.get("support_admin", "KingToolShopSupport").lstrip("@")
         text = (
-            "📁 **THƯ MỤC: QUẢN LÝ KHÁCH HÀNG & THÔNG BÁO**\n\n"
+            "📁 **THƯ MỤC: QUẢN LÝ KHÁCH HÀNG & HỘP THƯ CHAT**\n\n"
+            f"• 📥 Hộp thư tin nhắn: **{unread_chat_cnt} khách đang chờ trả lời**\n"
             f"• 👥 Tổng khách hàng: **{stats['users_count']} khách**\n"
             f"• 📦 Tổng đơn hàng: **{stats['orders_count']} đơn**\n"
             f"• 🆘 Nhóm CSKH: **@{adm_user}**\n"
-            "💡 *Mẹo: Bấm **👥 Danh sách Khách hàng** bên dưới để xem tên hiển thị đầy đủ và nhắn tin trực tiếp 1 chạm tới bất kỳ khách nào (kể cả khách không đặt `@username`)!*"
+            "💡 *Mẹo: Bấm **📥 Hộp Thư Chat Khách Hàng** để quản lý tập trung toàn bộ cuộc trò chuyện tách riêng từng khách (không bao giờ bị rối khi nhiều khách nhắn cùng lúc)!*"
         )
         rows = [
             [
-                Button.inline("👥 Danh sách Khách hàng (Nhắn tin 1 chạm)", b"adm:userlist:0", style="success"),
+                Button.inline(
+                    f"📥 Hộp Thư Chat Khách Hàng ({unread_chat_cnt} chờ trả lời)"
+                    if unread_chat_cnt > 0
+                    else "📥 Hộp Thư Chat Khách Hàng",
+                    b"adm:inbox:0",
+                    style="danger" if unread_chat_cnt > 0 else "success",
+                ),
+            ],
+            [
+                Button.inline("👥 Danh sách Khách hàng (Nhắn tin 1 chạm)", b"adm:userlist:0", style="primary"),
             ],
             [
                 Button.inline("🔍 Tra cứu theo Tên / ID", b"adm:finduser", style="primary"),
@@ -2505,11 +2608,80 @@ async def render_admin_user_detail(
         [Button.inline(f"💬 Mở Phiên Trò Chuyện Riêng (@KingToolShop_bot ↔ {safe_name[:12]})", f"adm:msg:{f_uid}".encode(), style="success")],
         [Button.inline("💵 Cộng / Trừ số dư khách này", f"adm:addbal_u:{f_uid}".encode(), style="primary")],
         [
-            Button.inline("👥 Danh sách Khách hàng", b"adm:userlist:0"),
-            Button.inline("« Thư mục Khách Hàng", b"adm:dir:users"),
+            Button.inline("📥 Hộp Thư Chat", b"adm:inbox:0"),
+            Button.inline("👥 Danh sách Khách", b"adm:userlist:0"),
+            Button.inline("« Thư mục KH", b"adm:dir:users"),
         ],
     ]
     await send_or_edit(event, info_txt, buttons=rows, force_new=force_new)
+
+
+async def render_admin_chat_inbox(event: Any, page: int = 0) -> None:
+    """Hiển thị Hộp Thư Tin Nhắn Khách Hàng (Inbox) tách biệt từng khách, ưu tiên khách đang chờ phản hồi lên đầu."""
+    threads = db.get_chat_inbox_threads(limit=40)
+    per_page = 8
+    total = len(threads)
+    start = page * per_page
+    sliced = threads[start : start + per_page]
+    unread_total = sum(1 for item in threads if item.get("needs_reply"))
+
+    if not threads:
+        text = (
+            "📥 **HỘP THƯ TIN NHẮN KHÁCH HÀNG (INBOX)**\n\n"
+            "*(Hiện chưa có cuộc trò chuyện nào. Khi khách nhắn tin hoặc bạn nhắn cho khách, từng khách sẽ xuất hiện thành 1 mục riêng tại đây)*"
+        )
+        rows: list[list[Any]] = [
+            [Button.inline("👥 Mở Danh sách Khách hàng", b"adm:userlist:0", style="success")],
+            [Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")],
+        ]
+        await send_or_edit(event, text, buttons=rows)
+        return
+
+    lines = [
+        "📥 **HỘP THƯ TIN NHẮN KHÁCH HÀNG (QUẢN LÝ ĐA KHÁCH KHÔNG BỊ RỐI)**",
+        f"🔴 Đang chờ Shop trả lời: **{unread_total} khách** | 💬 Tổng hội thoại: **{total} khách**",
+        "🛡️ *Mỗi khách được gom vào 1 phiên riêng biệt — bấm vào tên khách bên dưới để mở riêng lịch sử & trả lời khách đó:*",
+        "━━━━━━━━━━━━━━━━━━",
+    ]
+    rows = []
+    for item in sliced:
+        t_uid = int(item["user_id"])
+        safe_name, _, _ = get_user_display_parts(t_uid, item)
+        needs_reply = bool(item.get("needs_reply"))
+        status_icon = "🔴 **[CHỜ TRẢ LỜI]**" if needs_reply else "🟢 *[Đã phản hồi]*"
+        last_ts = str(item.get("last_at", ""))[5:16]
+        last_sender = "👤 Khách" if needs_reply else "🤖 Shop"
+        preview = str(item.get("last_content", "")).replace("\n", " ").strip()
+        if len(preview) > 58:
+            preview = preview[:55] + "..."
+        ord_cnt = int(item.get("orders_count", 0) or 0)
+        lines.append(
+            f"• {status_icon} **{safe_name}** (`{t_uid}`) — 📦 {ord_cnt} đơn\n"
+            f"  └ `[{last_ts}]` {last_sender}: *{preview}*"
+        )
+        btn_prefix = "🔴 Chờ trả lời:" if needs_reply else "🟢 Đã trả lời:"
+        rows.append([
+            Button.inline(
+                f"{btn_prefix} {safe_name[:14]} ({ord_cnt} đơn)",
+                f"adm:msg:{t_uid}".encode(),
+                style="danger" if needs_reply else "success",
+            ),
+            Button.inline("👤 Hồ sơ", f"adm:uinfo:{t_uid}".encode(), style="primary"),
+        ])
+
+    nav: list[Any] = []
+    if page > 0:
+        nav.append(Button.inline("⬅️ Trang trước", f"adm:inbox:{page - 1}".encode()))
+    if start + per_page < total:
+        nav.append(Button.inline("Trang sau ➡️", f"adm:inbox:{page + 1}".encode()))
+    if nav:
+        rows.append(nav)
+    rows.append([
+        Button.inline("🔄 Làm mới Hộp thư", f"adm:inbox:{page}".encode(), style="primary"),
+        Button.inline("👥 Tất cả Khách hàng", b"adm:userlist:0"),
+    ])
+    rows.append([Button.inline("« Về Bảng Quản Trị Admin", b"adm:home")])
+    await send_or_edit(event, "\n".join(lines), buttons=rows)
 
 
 async def render_admin_product_list(event: Any, page: int = 0) -> None:
@@ -3797,6 +3969,12 @@ async def run_bot() -> None:
                 await render_admin_user_list(event, page=page_idx)
                 return
 
+            if data.startswith("adm:inbox:"):
+                await event.answer()
+                page_idx = int(data.split(":")[2]) if len(data.split(":")) >= 3 and data.split(":")[2].isdigit() else 0
+                await render_admin_chat_inbox(event, page=page_idx)
+                return
+
             if data.startswith("adm:uinfo:"):
                 await event.answer()
                 target_uid = int(data.split(":")[2])
@@ -3808,45 +3986,50 @@ async def run_bot() -> None:
                 await event.answer("✅ Đã đóng phiên trò chuyện với khách hàng.")
                 await send_or_edit(
                     event,
-                    "🚪 **Đã đóng phiên trò chuyện riêng với khách hàng.**\n*(Bấm nút bên dưới để quay lại Bảng điều khiển Admin)*",
-                    buttons=[[Button.inline("« Về Bảng Admin", b"adm:home")]],
+                    "🚪 **Đã đóng phiên trò chuyện riêng với khách hàng.**\n*(Bấm nút bên dưới để mở Hộp thư khách hàng hoặc về Bảng điều khiển Admin)*",
+                    buttons=[
+                        [Button.inline("📥 Hộp Thư Chat Khách Hàng", b"adm:inbox:0", style="success")],
+                        [Button.inline("« Về Bảng Admin", b"adm:home")],
+                    ],
                 )
                 return
 
             if data.startswith("adm:msg:"):
-                await event.answer("💬 Đã mở khung nhập tin nhắn với khách hàng!")
+                await event.answer("💬 Đã mở phiên chat với khách hàng!")
                 target_uid = int(data.split(":")[2])
                 tu = db.get_or_create_user(target_uid)
                 safe_name, _, _ = get_user_display_parts(target_uid, tu)
                 orders_block = format_customer_orders_summary_block(target_uid, limit=5)
                 history_block = format_customer_chat_history_block(target_uid, limit=10)
+                unread_cnt = db.get_unread_chat_count()
+                inbox_lbl = f"📥 Hộp Thư Chat ({unread_cnt} chờ trả lời)" if unread_cnt > 0 else "📥 Hộp Thư Tất Cả Khách Chat"
                 USER_AWAITING[uid] = {
                     "type": "admin_direct_msg",
                     "target_uid": target_uid,
                 }
-                await send_or_edit(
-                    event,
-                    (
-                        f"💬 **PHIÊN TRÒ CHUYỆN RIÊNG: @KingToolShop_bot ↔ KHÁCH HÀNG**\n"
-                        f"🛡️ *(Chế độ ẩn danh 100% — `@KingToolShop_bot` đóng vai Shop trò chuyện với khách, không lộ tài khoản cá nhân Admin)*\n\n"
-                        f"{format_admin_user_line(target_uid, tu)}\n"
-                        f"💵 Số dư ví: **{vnd_int(tu.get('balance', 0)):,}đ** | 📦 Đã mua: **{tu.get('orders_count', 0)} đơn**\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"{orders_block}\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"{history_block}\n"
-                        f"━━━━━━━━━━━━━━━━━━\n"
-                        f"🟢 **ĐANG MỞ PHIÊN CHAT LIÊN TỤC:** Nhập nội dung tin nhắn hoặc gửi hình ảnh ngay bên dưới để **@KingToolShop_bot** gửi thẳng cho khách hàng:"
-                    ),
-                    buttons=[
-                        [
-                            Button.inline("🔄 Làm mới Lịch sử", f"adm:msg:{target_uid}".encode(), style="primary"),
-                            Button.inline("👤 Hồ sơ & Đơn hàng", f"adm:uinfo:{target_uid}".encode()),
-                        ],
-                        [Button.inline("🚪 Đóng phiên trò chuyện này", b"adm:close_chat", style="danger")],
-                    ],
-                    force_new=True,
+                session_md = (
+                    f"💬 **PHIÊN CHAT RIÊNG: @KingToolShop_bot ↔ {safe_name.upper()} (`{target_uid}`)**\n"
+                    f"🛡️ *(Chế độ ẩn danh 100% — `@KingToolShop_bot` đóng vai Shop trò chuyện với khách, mỗi khách chỉ giữ 1 thẻ gọn gàng)*\n\n"
+                    f"{format_admin_user_line(target_uid, tu)}\n"
+                    f"💵 Số dư ví: **{vnd_int(tu.get('balance', 0)):,}đ** | 📦 Đã mua: **{tu.get('orders_count', 0)} đơn**\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"{orders_block}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"{history_block}\n"
+                    f"━━━━━━━━━━━━━━━━━━\n"
+                    f"🟢 **ĐANG KHÓA PHIÊN CHAT Ở KHÁCH NÀY (`{safe_name}`):** Nhập nội dung tin nhắn hoặc gửi hình ảnh ngay bên dưới để **@KingToolShop_bot** gửi thẳng cho khách:"
                 )
+                session_btns = [
+                    [
+                        Button.inline("🔄 Làm mới Lịch sử", f"adm:msg:{target_uid}".encode(), style="primary"),
+                        Button.inline("👤 Hồ sơ & Đơn hàng", f"adm:uinfo:{target_uid}".encode()),
+                    ],
+                    [
+                        Button.inline(inbox_lbl, b"adm:inbox:0", style="danger" if unread_cnt > 0 else "primary"),
+                        Button.inline("🚪 Đóng phiên chat", b"adm:close_chat", style="danger"),
+                    ],
+                ]
+                await _replace_admin_customer_chat_card(client, uid, target_uid, session_md, session_btns)
                 try:
                     await client.send_message(
                         uid,

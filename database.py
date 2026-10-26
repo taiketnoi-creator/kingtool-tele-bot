@@ -64,6 +64,7 @@ DEFAULT_SETTINGS: dict[str, str] = {
     "deposit_reminder_enabled": "1",     # Tự động nhắc khách hoàn tất đơn nạp VietQR bỏ dở sau 10 phút (1=Bật, 0=Tắt)
     "dante_base_url": "https://dantehub.shop/api/public/v1",  # URL API Nguồn 2 (@DanteHubBot)
     "dante_api_key": "",                 # API Key đối tác @DanteHubBot (dh_live_...)
+    "last_low_bal_alert_date": "",       # Ngày gần nhất đã gửi cảnh báo số dư vốn thấp (tối đa 1 lần/ngày trừ khi có khách mua)
 }
 
 TIER_DISCOUNTS: dict[str, int] = {
@@ -2342,3 +2343,57 @@ class Database:
             items = [dict(r) for r in rows]
             items.reverse()
             return items
+
+    def get_chat_inbox_threads(self, limit: int = 30) -> list[dict[str, Any]]:
+        """Lấy danh sách các cuộc trò chuyện khách hàng (gom theo user_id), ưu tiên khách đang chờ phản hồi lên đầu."""
+        with self._conn() as conn:
+            rows = conn.execute(
+                """
+                SELECT m.user_id,
+                       m.sender_role AS last_role,
+                       m.content AS last_content,
+                       m.created_at AS last_at,
+                       stats.msg_count
+                FROM chat_messages m
+                INNER JOIN (
+                    SELECT user_id, MAX(id) AS max_id, COUNT(*) AS msg_count
+                    FROM chat_messages
+                    GROUP BY user_id
+                ) stats ON m.id = stats.max_id
+                ORDER BY CASE WHEN m.sender_role = 'customer' THEN 0 ELSE 1 END ASC,
+                         m.id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+            result: list[dict[str, Any]] = []
+            for r in rows:
+                d = dict(r)
+                uid = int(d["user_id"])
+                u_cached = self._users_cache.get(uid, (0.0, {}))[1]
+                if not u_cached:
+                    u_cached = self.get_or_create_user(uid)
+                d["full_name"] = u_cached.get("full_name", "")
+                d["username"] = u_cached.get("username", "")
+                d["balance"] = int(round(float(u_cached.get("balance", 0) or 0)))
+                d["orders_count"] = int(u_cached.get("orders_count", 0) or 0)
+                d["needs_reply"] = str(d.get("last_role", "")).lower() == "customer"
+                result.append(d)
+            return result
+
+    def get_unread_chat_count(self) -> int:
+        """Đếm số lượng khách hàng có tin nhắn cuối cùng là từ 'customer' (đang chờ Shop phản hồi)."""
+        with self._conn() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) AS cnt
+                FROM chat_messages m
+                INNER JOIN (
+                    SELECT user_id, MAX(id) AS max_id
+                    FROM chat_messages
+                    GROUP BY user_id
+                ) stats ON m.id = stats.max_id
+                WHERE m.sender_role = 'customer'
+                """
+            ).fetchone()
+            return int(row["cnt"] or 0) if row else 0

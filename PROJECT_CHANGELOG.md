@@ -5,6 +5,25 @@
 
 ---
 
+## [v3.0.1] - 2026-10-26: Hộp Thư Quản Lý Chat Đa Khách Hàng Chống Rối (`adm:inbox`) & Giới Hạn Cảnh Báo Vốn 1 Lần/Ngày
+
+### 📥 1. Quản Lý Đa Khách Hàng Nhắn Tin Cùng Lúc Không Bị Rối (`database.py`, `bot.py`)
+- **Hộp Thư Tin Nhắn Khách Hàng Tập Trung (`📥 Hộp Thư Chat Khách Hàng` — `adm:inbox`, `get_chat_inbox_threads`, `get_unread_chat_count`):**
+  - Tự động phân loại mọi cuộc trò chuyện khách hàng thành 2 nhóm ưu tiên: **🔴 Đang chờ Shop trả lời** (luôn ghim lên đầu) và **🟢 Đã phản hồi**.
+  - Hiển thị ngay trên trang chủ `/admin` và dưới đáy mỗi thẻ chat để Admin chuyển đổi qua lại giữa các khách hàng chỉ bằng 1 chạm.
+- **Cơ chế `1 Khách = 1 Thẻ Hội Thoại Duy Nhất` (`_replace_admin_customer_chat_card`):**
+  - Khi một khách nhắn nhiều tin liên tiếp hoặc Admin trả lời, hệ thống tự động thu gọn (xóa) thẻ hội thoại cũ của khách đó và chỉ giữ lại **1 thẻ cập nhật mới nhất** cho mỗi khách hàng, giúp màn hình Telegram của Admin luôn gọn gàng kể cả khi nhiều khách nhắn cùng lúc.
+- **Chốt chặn Chống Nhầm Khách (`Session Lock`):**
+  - Khi Admin đang mở phiên gõ phím với Khách A mà Khách B nhắn vào, phiên gõ phím vẫn khóa cố định ở Khách A (kèm cảnh báo rõ ràng trên thẻ của Khách B) để tuyệt đối không gửi nhầm tin nhắn sang khách khác.
+
+### 🏦 2. Giới Hạn Cảnh Báo Số Dư Vốn `@ProdSellerBot` Tối Đa 1 Lần/Ngày Hoặc Khi Có Khách Mua Hàng (`bot.py`, `database.py`)
+- **Bền vững hóa lịch sử cảnh báo theo ngày (`last_low_bal_alert_date` trong `telebot.settings`):**
+  - Lưu ngày đã cảnh báo (`YYYY-MM-DD` theo giờ VN `UTC+7`) trực tiếp vào Supabase PostgreSQL để tiến trình kiểm tra nền chỉ báo **tối đa 1 lần / ngày** (không bị báo lặp lại mỗi khi Render khởi động lại hoặc sau 4 giờ).
+- **Báo ngay tức thì khi phát sinh đơn hàng thật (`force_on_purchase=True`):**
+  - Khi có khách hàng thực hiện mua hàng thật (`execute_purchase`) mà số dư vốn dưới ngưỡng cài đặt, hệ thống sẽ báo ngay lập tức tại thời điểm đó để Admin kịp thời nạp vốn.
+
+---
+
 ## [v3.0.0] - 2026-10-26: Phiên Trò Chuyện Riêng Ẩn Danh 100% (`@KingToolShop_bot ↔ Khách Hàng`) & Gỡ Bỏ Hoàn Toàn Tài Khoản Cá Nhân Admin
 
 ### 🛡️ 1. Bảo Mật 100% Danh Tính Admin — `@KingToolShop_bot` Đóng Vai Shop Trò Chuyện Trực Tiếp Với Khách (`bot.py`, `database.py`)
